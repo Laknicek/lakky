@@ -404,14 +404,14 @@ function makePlayerRPC() {
 					// the publish loop all continue uninterrupted.
 					miniWindow.on("close", () => {
 						miniWindow = null;
-						try { mainWindow.show(); } catch {}
+						showMainWindow();
 					});
-					try { mainWindow.hide(); } catch {}
+					hideMainWindow();
 					return { ok: true };
 				} catch (err) {
 					console.warn("[mini] open failed:", (err as Error).message);
 					miniWindow = null;
-					try { mainWindow.show(); } catch {}
+					showMainWindow();
 					return { ok: false };
 				}
 			},
@@ -421,13 +421,13 @@ function makePlayerRPC() {
 				// re-shows the main window.
 				try { miniWindow?.close(); } catch {}
 				miniWindow = null;
-				try { mainWindow.show(); } catch {}
+				showMainWindow();
 				return { ok: true };
 			},
 
 			sendToTray: () => {
 				try {
-					mainWindow.hide();
+					hideMainWindow();
 					Utils.showNotification({
 						title: "Lakky",
 						body: latestPlayerState?.track
@@ -443,8 +443,7 @@ function makePlayerRPC() {
 
 			restoreFromTray: () => {
 				try {
-					mainWindow.show();
-					mainWindow.activate();
+					showMainWindow();
 					return { ok: true };
 				} catch {
 					return { ok: false };
@@ -585,20 +584,37 @@ onDiscordStatus((connected) => {
 	mainWindow.webview.rpc?.send.discordStatusChanged({ connected });
 });
 
-// ---------- System tray ----------
-// The tray icon stays present whenever the app is running, so the user can
-// drop the window into the background ("send to tray") and still control
-// playback from the notification area. Actions go through the same
-// externalCommand bus that the mini-player and web remote use.
+// ---------- Window visibility tracking ----------
+// Bun is the only side that knows when the window is hidden (send-to-tray
+// or minimize-to-tray). The renderer kills its visualizers and pauses CSS
+// animations when it's hidden so we don't burn GPU drawing things nobody
+// can see. We broadcast on every hide/show.
+let mainWindowHidden = false;
+function notifyVisibility() {
+	mainWindow.webview.rpc?.send.windowStateChanged({
+		maximized: false,
+		fullscreen: false,
+		hidden: mainWindowHidden,
+	});
+}
 function showMainWindow() {
 	try {
 		mainWindow.show();
 		mainWindow.activate();
+		if (mainWindowHidden) {
+			mainWindowHidden = false;
+			notifyVisibility();
+		}
 	} catch {}
 }
-
 function hideMainWindow() {
-	try { mainWindow.hide(); } catch {}
+	try {
+		mainWindow.hide();
+		if (!mainWindowHidden) {
+			mainWindowHidden = true;
+			notifyVisibility();
+		}
+	} catch {}
 }
 
 let trayPlaying = false; // tracks last-known state for tooltip label

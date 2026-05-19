@@ -201,7 +201,7 @@ export type PlayerRPC = {
 			scanProgress: { scanned: number; total: number; current: string };
 			copyProgress: { done: number; total: number; current: string };
 			discordStatusChanged: { connected: boolean };
-			windowStateChanged: { maximized: boolean; fullscreen: boolean };
+			windowStateChanged: { maximized: boolean; fullscreen: boolean; hidden: boolean };
 			// External controllers (mini-player, web remote) send commands here.
 			externalCommand: { action: ExternalCommand; value?: number | string };
 			// Mini-player asks the main window to push its latest state.

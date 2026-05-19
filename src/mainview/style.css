@@ -2770,3 +2770,16 @@ body[data-strip-viz="off"] .app-root {
 	80%  { opacity: 0.5; }
 	100% { transform: translate(calc(sin(var(--i)) * 18px), -260px) scale(1.15); opacity: 0; }
 }
+
+/* ---------- Tray / hidden-window hibernation ----------
+   When bun tells us the window is hidden (sendToTray / mini-player swap /
+   minimize-to-tray) we kill rAF loops in JS and use this rule to suspend
+   every CSS animation and transition. The compositor still exists but with
+   nothing changing it has nothing to paint, so GPU usage drops to idle. */
+body[data-app-hidden="1"],
+body[data-app-hidden="1"] *,
+body[data-app-hidden="1"] *::before,
+body[data-app-hidden="1"] *::after {
+	animation-play-state: paused !important;
+	transition: none !important;
+}

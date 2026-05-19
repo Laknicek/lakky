@@ -31,7 +31,7 @@ The script does three things:
 2. `bun installer\make-wizard-images.ts` — re-renders `wizard-side.png` (164×314) and `wizard-small.png` (55×58) from `assets\icon-source.jpg` using sharp.
 3. `ISCC.exe installer\lakky.iss` — compiles the LZMA2-ultra installer.
 
-Output: `artifacts\Lakky-Setup-1.0.0.exe` — a single .exe to distribute.
+Output: `artifacts\Lakky-Setup-X.Y.Z.exe` (matches `MyAppVersion` in `lakky.iss`) — a single .exe to distribute.
 
 ## Files
 

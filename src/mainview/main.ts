@@ -34,7 +34,9 @@ const rpc = Electroview.defineRPC<PlayerRPC>({
 				state.discordConnected = connected;
 				renderSidebarFoot();
 			},
-			windowStateChanged: () => {},
+			windowStateChanged: ({ hidden }) => {
+				setRendererHidden(hidden);
+			},
 			externalCommand: ({ action, value }) => {
 				applyExternalCommand(action, value);
 			},
@@ -135,7 +137,7 @@ const state = {
 
 // Mirrors package.json so we have something to compare release tags against
 // without bundling the JSON. Bump in lockstep on every release.
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.0.1";
 
 // ---------- DOM ----------
 const splashEl = document.getElementById("splash")!;
@@ -286,7 +288,12 @@ function ensureAudioRunning() {
 	}
 }
 sharedAudioCtx.addEventListener("statechange", ensureAudioRunning);
-document.addEventListener("visibilitychange", ensureAudioRunning);
+document.addEventListener("visibilitychange", () => {
+	ensureAudioRunning();
+	// Chromium fires this for both tab-hidden and OS-level minimize. Mirror
+	// the bun-driven hide flag so a plain minimize also stops the visualizers.
+	setRendererHidden(document.visibilityState === "hidden");
+});
 window.addEventListener("focus", ensureAudioRunning);
 setInterval(() => {
 	// Only nudge while some engine should be playing — otherwise leave the
@@ -1074,6 +1081,30 @@ function applyVizPerf() {
 	stripViz?.setIdleEnabled(state.settings.idleViz);
 	visualizer?.setMaxFps(state.settings.maxFps);
 	visualizer?.setIdleEnabled(state.settings.idleViz);
+}
+
+// Bun tells us whenever the window is hidden — send-to-tray, minimize-to-tray,
+// the mini-player swap, anything that takes the main window off-screen. We tear
+// down the rAF-driven visualizers (which otherwise keep painting an unseen
+// canvas) and set a body attribute so CSS animations can suspend themselves
+// via a single rule. Audio keeps playing — only the rendering work stops.
+let rendererHidden = false;
+function setRendererHidden(hidden: boolean) {
+	if (rendererHidden === hidden) return;
+	rendererHidden = hidden;
+	if (hidden) {
+		document.body.dataset.appHidden = "1";
+		visualizer?.destroy();
+		visualizer = null;
+		stripViz?.destroy();
+		stripViz = null;
+	} else {
+		delete document.body.dataset.appHidden;
+		mountStripVisualizer();
+		// If the user comes back on the Now Playing view we need to rebuild
+		// the big visualizer too — it lives inside the view's main area.
+		if (state.view === "nowplaying") renderMain();
+	}
 }
 
 // ---------- MediaSession (Windows SMTC + media keys + taskbar flyout) ----------

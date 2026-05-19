@@ -11,7 +11,7 @@
 #      taskbar icon sticks on the binary that actually ships.
 #   4. Re-renders the wizard branding images.
 #   5. Invokes the Inno Setup compiler.
-#       → output: artifacts/Lakky-Setup-1.0.0.exe
+#       → output: artifacts/Lakky-Setup-X.Y.Z.exe (X.Y.Z = MyAppVersion in lakky.iss)
 #
 # Prerequisite (one-time):
 #   Install Inno Setup 6.3 or newer from https://jrsoftware.org/isdl.php
@@ -83,7 +83,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
 
     Write-Host ""
-    Write-Host "==> Done. Installer at artifacts\Lakky-Setup-1.0.0.exe" -ForegroundColor Green
+    $built = Get-ChildItem "artifacts\Lakky-Setup-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    Write-Host "==> Done. Installer at $($built.FullName)" -ForegroundColor Green
 } finally {
     Pop-Location
 }
