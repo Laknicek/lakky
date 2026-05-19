@@ -3,7 +3,7 @@
 ; Build:  iscc installer\lakky.iss   (after `bun run build`)
 
 #define MyAppName        "Lakky"
-#define MyAppVersion     "1.0.2"
+#define MyAppVersion     "1.0.3"
 #define MyAppPublisher   "Laknicek"
 #define MyAppURL         "https://github.com/Laknicek/lakky"
 #define MyAppExeName     "launcher.exe"

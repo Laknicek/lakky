@@ -5,6 +5,22 @@ import {
 	Updater,
 	Utils,
 } from "electrobun/bun";
+
+// WebView2 (the Chromium runtime Electrobun uses on Windows) reads this env
+// var the very first time a WebView is initialized — once we construct the
+// first BrowserWindow the flags are locked in for the process lifetime.
+// Disabling the background/occlusion throttling family stops Chromium from
+// muting the audio output when the window is minimized. Without these flags
+// the next track in a queue plays silently while the window is iconified;
+// with them background playback behaves like a normal music app.
+process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = [
+	process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS ?? "",
+	"--disable-background-timer-throttling",
+	"--disable-renderer-backgrounding",
+	"--disable-backgrounding-occluded-windows",
+	"--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
+	"--autoplay-policy=no-user-gesture-required",
+].filter(Boolean).join(" ");
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { PlayerRPC, TrackInfo, SharedPlayerState, ExternalCommand } from "../shared/rpcSchema";

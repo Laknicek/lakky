@@ -140,7 +140,7 @@ const state = {
 
 // Mirrors package.json so we have something to compare release tags against
 // without bundling the JSON. Bump in lockstep on every release.
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.0.3";
 
 // ---------- DOM ----------
 const splashEl = document.getElementById("splash")!;
