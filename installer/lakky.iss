@@ -4,8 +4,8 @@
 
 #define MyAppName        "Lakky"
 #define MyAppVersion     "1.0.0"
-#define MyAppPublisher   "LAK"
-#define MyAppURL         "https://lakky.app"
+#define MyAppPublisher   "Laknicek"
+#define MyAppURL         "https://github.com/Laknicek/lakky"
 #define MyAppExeName     "launcher.exe"
 #define MyAppExePath     "bin\" + MyAppExeName
 
