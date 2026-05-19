@@ -27,7 +27,7 @@ PowerShell -ExecutionPolicy Bypass -File installer\build.ps1
 
 The script does three things:
 
-1. `bun run build` — Vite + Electrobun produce `build\win-x64\Lakky\`.
+1. `bun run build` — Vite + Electrobun produce `build\stable-win-x64\Lakky\`.
 2. `bun installer\make-wizard-images.ts` — re-renders `wizard-side.png` (164×314) and `wizard-small.png` (55×58) from `assets\icon-source.jpg` using sharp.
 3. `ISCC.exe installer\lakky.iss` — compiles the LZMA2-ultra installer.
 

@@ -6,8 +6,7 @@
 //  • mixed CRLF/LF line endings tolerated
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 export async function readM3U(playlistPath: string): Promise<string[]> {
 	const raw = await readFile(playlistPath, "utf8");
@@ -28,7 +27,7 @@ export async function writeM3U(
 	paths: string[],
 ): Promise<void> {
 	const dir = dirname(playlistPath);
-	if (!existsSync(dir)) await mkdir(dir, { recursive: true });
+	await mkdir(dir, { recursive: true });
 	const lines = ["#EXTM3U", `#PLAYLIST:${name}`];
 	for (const p of paths) lines.push(p);
 	await writeFile(playlistPath, lines.join("\r\n") + "\r\n", "utf8");

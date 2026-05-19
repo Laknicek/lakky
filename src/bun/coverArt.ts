@@ -9,22 +9,12 @@
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { appDataDir, LAKKY_APP_DATA } from "./paths";
 
 type CacheEntry = { url: string | null; ts: number };
 
-function cacheDir(): string {
-	const name = "Lakky";
-	if (process.platform === "win32") {
-		return join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), name);
-	}
-	if (process.platform === "darwin") {
-		return join(homedir(), "Library", "Application Support", name);
-	}
-	return join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), name);
-}
 function cachePath(): string {
-	return join(cacheDir(), "discord-cover-cache.json");
+	return join(appDataDir(LAKKY_APP_DATA), "discord-cover-cache.json");
 }
 
 let cache: Map<string, CacheEntry> | null = null;

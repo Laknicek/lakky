@@ -249,9 +249,25 @@ class DiscordIpc {
 let client: DiscordIpc | null = null;
 let lastPresence: DiscordPresence | null = null;
 
+// The shape Discord's IPC accepts in SET_ACTIVITY. Keys are snake_case
+// per Discord's protocol — keep them that way.
+type DiscordActivity = {
+	instance: boolean;
+	details?: string;
+	state?: string;
+	timestamps?: { start?: number; end?: number };
+	assets?: {
+		large_image?: string;
+		large_text?: string;
+		small_image?: string;
+		small_text?: string;
+	};
+	buttons?: Array<{ label: string; url: string }>;
+};
+
 function applyPresence(presence: DiscordPresence) {
 	if (!client || !client.isReady) return;
-	const activity: any = { instance: false };
+	const activity: DiscordActivity = { instance: false };
 	if (presence.details) activity.details = presence.details.slice(0, 128);
 	if (presence.state) activity.state = presence.state.slice(0, 128);
 	if (presence.startTimestamp || presence.endTimestamp) {

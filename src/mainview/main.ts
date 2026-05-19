@@ -6,6 +6,7 @@ import type {
 	DiscordPresence,
 	ExternalCommand,
 	SharedPlayerState,
+	LatestReleaseInfo,
 } from "../shared/rpcSchema";
 import { AudioEngine, EQ_PRESETS, EQ_BANDS, type RepeatMode } from "./audio";
 import { Visualizer, type VizStyle } from "./visualizer";
@@ -15,6 +16,7 @@ import { installTooltips } from "./tooltip";
 import type { NodeGraph } from "./nodes";
 import { newGraph } from "./nodes";
 import { renderNodeEditor } from "./nodeEditor";
+import { escapeHtml } from "./util";
 
 // ---------- RPC ----------
 const rpc = Electroview.defineRPC<PlayerRPC>({
@@ -69,6 +71,14 @@ type Settings = {
 	idleViz: boolean;      // pulse while paused (off saves a touch more GPU)
 	vizStyle: VizStyle;    // bars | wave | radial | mirror — for the Now Playing visualizer
 	showStripViz: boolean; // when false, the bottom-bar strip visualizer's div is removed entirely
+	// Auto-updater: leave updateRepo empty to disable the feature entirely.
+	// Format is "owner/repo" — the renderer polls GitHub releases on startup
+	// and every few hours when this is set.
+	updateRepo: string;
+	autoCheckUpdates: boolean;
+	// Tag the user explicitly dismissed via "Skip this version" so we don't
+	// keep nagging them about the same release.
+	skippedUpdateTag: string;
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -91,6 +101,9 @@ const DEFAULT_SETTINGS: Settings = {
 	idleViz: true,
 	vizStyle: "bars",
 	showStripViz: true,
+	updateRepo: "Laknicek/lakky",
+	autoCheckUpdates: true,
+	skippedUpdateTag: "",
 };
 
 const state = {
@@ -115,7 +128,14 @@ const state = {
 	// 10-band EQ chain inside the AudioEngine. The node editor view owns
 	// the UI for this; we just persist it and push updates to both engines.
 	nodeGraph: null as NodeGraph | null,
+	// Most recent release the updater discovered. Non-null only while the
+	// update card is mounted and dismissible.
+	pendingUpdate: null as LatestReleaseInfo | null,
 };
+
+// Mirrors package.json so we have something to compare release tags against
+// without bundling the JSON. Bump in lockstep on every release.
+const APP_VERSION = "1.0.0";
 
 // ---------- DOM ----------
 const splashEl = document.getElementById("splash")!;
@@ -212,7 +232,7 @@ document.getElementById("tb-close")?.addEventListener("click", async (e) => {
 // video engine all attach their own filter chains here, which is what lets
 // crossfade work — two parallel sources can be mixed by the same context.
 const sharedAudioCtx: AudioContext = new (
-	window.AudioContext || (window as any).webkitAudioContext
+	window.AudioContext || window.webkitAudioContext!
 )();
 function createAudioEl(): HTMLAudioElement {
 	const a = document.createElement("audio");
@@ -239,21 +259,20 @@ const videoEl = (() => {
 // One analyser shared across all three engines. The visualizer reads from
 // this node, so it sees signal no matter which engine is primary — no stale
 // tap after a crossfade, no silence when video kicks in.
-// 2048 bins → ~21.5 Hz per bin at 44.1 kHz — fine resolution in the bass
-// region without adding visible latency.
-const sharedAnalyser = sharedAudioCtx.createAnalyser();
-sharedAnalyser.fftSize = 2048;
-sharedAnalyser.smoothingTimeConstant = 0.72;
-sharedAnalyser.minDecibels = -90;
-sharedAnalyser.maxDecibels = -20;
-sharedAnalyser.connect(sharedAudioCtx.destination);
+// Stable tap point downstream of every engine's gain stage. Engines route
+// their output through this identity gain instead of straight to destination,
+// which gives visualizers a single node to spawn their own AnalyserNodes off
+// of — one per visualizer, so two visualizers on the same screen don't
+// double-apply the analyser's internal smoothing.
+const monitorTap = sharedAudioCtx.createGain();
+monitorTap.connect(sharedAudioCtx.destination);
 
 // Two audio engines + one video engine, all sharing the audio graph. Each
 // engine wraps a fixed media element so the MediaElementSourceNode only gets
 // created once per element (the API forbids re-wrapping).
-const engineA = new AudioEngine(audioElA, sharedAudioCtx, sharedAnalyser);
-const engineB = new AudioEngine(audioElB, sharedAudioCtx, sharedAnalyser);
-const videoEngine = new AudioEngine(videoEl, sharedAudioCtx, sharedAnalyser);
+const engineA = new AudioEngine(audioElA, sharedAudioCtx, monitorTap);
+const engineB = new AudioEngine(audioElB, sharedAudioCtx, monitorTap);
+const videoEngine = new AudioEngine(videoEl, sharedAudioCtx, monitorTap);
 
 let crossfading = false;
 let crossfadeRaf: number | null = null;
@@ -395,10 +414,14 @@ async function startCrossfade(targetIdx: number, durationSec: number) {
 	const tick = () => {
 		const elapsed = (performance.now() - t0) / 1000;
 		const t = Math.min(1, elapsed / durationSec);
-		// Equal-power crossfade — cos² + sin² = 1, so perceived loudness
-		// stays roughly constant through the overlap.
-		outgoing.setVolume(userVol * Math.cos((t * Math.PI) / 2));
-		incoming.setVolume(userVol * Math.sin((t * Math.PI) / 2));
+		// Linear crossfade with an added midpoint dip so the transition is
+		// audibly a fade — the equal-power cos/sin curve hides the fade by
+		// keeping perceived loudness constant. The 0→1→0 sine envelope
+		// scaled by 0.22 drops the combined level ~5 dB at the centre,
+		// which gives the "breath" between tracks the user expects.
+		const dip = 1 - 0.22 * Math.sin(t * Math.PI);
+		outgoing.setVolume(userVol * (1 - t) * dip);
+		incoming.setVolume(userVol * t * dip);
 		if (t < 1) {
 			crossfadeRaf = requestAnimationFrame(tick);
 			return;
@@ -415,7 +438,6 @@ async function startCrossfade(targetIdx: number, durationSec: number) {
 		saveStats();
 		crossfading = false;
 		crossfadeRaf = null;
-		mountStripVisualizer();
 		updateNowPlayingBar();
 		updateAccentFromArt(next.artDataUrl);
 		updateMediaSession();
@@ -519,35 +541,53 @@ function cancelCrossfade() {
 }
 
 // ---------- Persistence ----------
+// Each key is loaded independently — a single corrupted key shouldn't take
+// down every other piece of state with it. Failures log to the console so
+// state-file corruption stays debuggable instead of silently resetting.
+async function loadPersistedKey<T>(
+	key: string,
+	guard: (v: unknown) => v is T,
+	apply: (v: T) => void,
+) {
+	try {
+		const r = await bun().loadPersistedState({ key });
+		if (guard(r.value)) apply(r.value);
+	} catch (err) {
+		console.warn(`[persist] load "${key}" failed:`, (err as Error).message);
+	}
+}
+
 async function loadPersisted() {
-	try {
-		const r = await bun().loadPersistedState({ key: "settings" });
-		if (r.value && typeof r.value === "object") {
-			Object.assign(state.settings, r.value);
-		}
-	} catch {}
-	try {
-		const r = await bun().loadPersistedState({ key: "library" });
-		if (Array.isArray(r.value)) state.library = r.value as TrackInfo[];
-	} catch {}
-	try {
-		const r = await bun().loadPersistedState({ key: "playlists" });
-		if (Array.isArray(r.value)) state.playlists = r.value as any;
-	} catch {}
-	try {
-		const r = await bun().loadPersistedState({ key: "stats" });
-		if (r.value && typeof r.value === "object") state.playStats = r.value as any;
-	} catch {}
-	try {
-		const r = await bun().loadPersistedState({ key: "bookmarks" });
-		if (r.value && typeof r.value === "object") state.bookmarks = r.value as any;
-	} catch {}
-	try {
-		const r = await bun().loadPersistedState({ key: "nodeGraph" });
-		if (r.value && typeof r.value === "object" && (r.value as any).nodes) {
-			state.nodeGraph = r.value as NodeGraph;
-		}
-	} catch {}
+	await loadPersistedKey<Partial<Settings>>(
+		"settings",
+		(v): v is Partial<Settings> => !!v && typeof v === "object",
+		(v) => Object.assign(state.settings, v),
+	);
+	await loadPersistedKey<TrackInfo[]>(
+		"library",
+		Array.isArray as (v: unknown) => v is TrackInfo[],
+		(v) => { state.library = v; },
+	);
+	await loadPersistedKey<typeof state.playlists>(
+		"playlists",
+		Array.isArray as (v: unknown) => v is typeof state.playlists,
+		(v) => { state.playlists = v; },
+	);
+	await loadPersistedKey<Record<string, number>>(
+		"stats",
+		(v): v is Record<string, number> => !!v && typeof v === "object",
+		(v) => { state.playStats = v; },
+	);
+	await loadPersistedKey<Record<string, number>>(
+		"bookmarks",
+		(v): v is Record<string, number> => !!v && typeof v === "object",
+		(v) => { state.bookmarks = v; },
+	);
+	await loadPersistedKey<NodeGraph>(
+		"nodeGraph",
+		(v): v is NodeGraph => !!v && typeof v === "object" && "nodes" in (v as object),
+		(v) => { state.nodeGraph = v; },
+	);
 }
 
 async function saveSettings() {
@@ -576,6 +616,168 @@ async function saveBookmarks() {
 	await bun().savePersistedState({ key: "bookmarks", value: state.bookmarks });
 }
 
+// ---------- Auto updater ----------
+// Strict-enough semver compare. Tags can be "v1.2.0" or "1.2.0"; pre-release
+// suffixes (-beta, -rc.1) sort below the corresponding stable.
+function compareVersions(a: string, b: string): number {
+	const norm = (v: string) => v.replace(/^v/i, "").trim();
+	const splitCore = (v: string) => {
+		const [core, pre = ""] = norm(v).split(/[-+]/, 2);
+		return { core: core.split(".").map((n) => parseInt(n, 10) || 0), pre };
+	};
+	const A = splitCore(a), B = splitCore(b);
+	const len = Math.max(A.core.length, B.core.length);
+	for (let i = 0; i < len; i++) {
+		const ai = A.core[i] ?? 0, bi = B.core[i] ?? 0;
+		if (ai !== bi) return ai > bi ? 1 : -1;
+	}
+	if (A.pre === B.pre) return 0;
+	if (!A.pre) return 1;
+	if (!B.pre) return -1;
+	return A.pre > B.pre ? 1 : -1;
+}
+
+// Hit GitHub /releases/latest via the bun-side helper. Returns the release
+// if it's newer than APP_VERSION and the user hasn't already skipped its
+// tag — otherwise null. Errors bubble up so the caller decides whether to
+// toast (manual check) or stay silent (boot poll).
+async function fetchUpdateIfNewer(silent: boolean): Promise<LatestReleaseInfo | null> {
+	const repo = state.settings.updateRepo.trim();
+	if (!repo) return null;
+	const { release } = await bun().checkLatestRelease({ repo });
+	if (!release) {
+		if (!silent) toast("No releases found on that repo.", { ttl: 2400 });
+		return null;
+	}
+	if (release.tag === state.settings.skippedUpdateTag) {
+		if (!silent) toast(`Latest is ${release.version} — you skipped this one.`, { ttl: 2600 });
+		return null;
+	}
+	if (compareVersions(release.version, APP_VERSION) <= 0) {
+		if (!silent) toast(`You're on the latest version (${APP_VERSION}).`, { ttl: 2400 });
+		return null;
+	}
+	return release;
+}
+
+let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
+async function startUpdateChecker() {
+	if (updateCheckTimer) {
+		clearInterval(updateCheckTimer);
+		updateCheckTimer = null;
+	}
+	if (!state.settings.updateRepo.trim()) return;
+	if (!state.settings.autoCheckUpdates) return;
+	const run = async () => {
+		try {
+			const release = await fetchUpdateIfNewer(true);
+			if (release) showUpdateCard(release);
+		} catch (err) {
+			// Network / rate-limit failures are normal — keep the poll
+			// going but log so it's visible in devtools.
+			console.warn("[updater] check failed:", (err as Error).message);
+		}
+	};
+	// First check 5s after boot so the splash and library scan finish first.
+	// Then every 6 hours.
+	setTimeout(run, 5000);
+	updateCheckTimer = setInterval(run, 6 * 60 * 60 * 1000);
+}
+
+async function manualUpdateCheck() {
+	sfx.click();
+	toast("Checking for updates…", { ttl: 1600, key: "upd" });
+	try {
+		const release = await fetchUpdateIfNewer(false);
+		if (release) showUpdateCard(release);
+	} catch (err) {
+		toast(`Update check failed: ${(err as Error).message}`, { ttl: 3200 });
+		sfx.error();
+	}
+}
+
+function showUpdateCard(release: LatestReleaseInfo) {
+	state.pendingUpdate = release;
+	renderUpdateCard();
+}
+
+function dismissUpdateCard(skip: boolean) {
+	const release = state.pendingUpdate;
+	state.pendingUpdate = null;
+	const el = document.getElementById("update-card");
+	if (el) {
+		el.classList.add("update-card-out");
+		setTimeout(() => el.remove(), 380);
+	}
+	if (skip && release) {
+		state.settings.skippedUpdateTag = release.tag;
+		void saveSettings();
+	}
+}
+
+function renderUpdateCard() {
+	document.getElementById("update-card")?.remove();
+	const r = state.pendingUpdate;
+	if (!r) return;
+	const notes = (r.notes || "No release notes provided.").trim();
+	// Hard truncate the body — full notes live on the release page.
+	const notesPreview = notes.length > 480 ? notes.slice(0, 477) + "…" : notes;
+	const html = `
+		<div class="update-card-glow"></div>
+		<div class="update-card-body">
+			<div class="update-card-head">
+				<div class="update-pill"><span class="update-pill-dot"></span>NEW VERSION</div>
+				<button class="update-x" id="upd-close" aria-label="Dismiss" data-tip="Remind me later">×</button>
+			</div>
+			<div class="update-versions">
+				<span class="update-from">v${escapeHtml(APP_VERSION)}</span>
+				<span class="update-arrow">→</span>
+				<span class="update-to">v${escapeHtml(r.version)}</span>
+			</div>
+			<div class="update-title">${escapeHtml(r.name)}</div>
+			<div class="update-notes">${escapeHtml(notesPreview)}</div>
+			<div class="update-actions">
+				<button class="btn update-primary" id="upd-get">${r.installerUrl ? "Download installer" : "Get update"}</button>
+				<button class="btn btn-ghost" id="upd-gh">Release page</button>
+				<button class="btn btn-ghost update-skip" id="upd-skip">Skip this version</button>
+			</div>
+			<div class="update-sparkles">
+				${Array.from({ length: 12 }, (_, i) => `<span class="update-sparkle" style="--i:${i};--d:${(i * 137) % 360}deg"></span>`).join("")}
+			</div>
+		</div>
+	`;
+	const root = document.createElement("aside");
+	root.id = "update-card";
+	root.className = "update-card";
+	root.innerHTML = html;
+	document.body.appendChild(root);
+	// Slide-in next frame so the transition fires.
+	requestAnimationFrame(() => root.classList.add("update-card-in"));
+
+	root.querySelector("#upd-close")?.addEventListener("click", () => {
+		sfx.click();
+		dismissUpdateCard(false);
+	});
+	root.querySelector("#upd-skip")?.addEventListener("click", () => {
+		sfx.click();
+		dismissUpdateCard(true);
+		toast(`Won't ask again for ${r.version}.`, { ttl: 2400 });
+	});
+	root.querySelector("#upd-gh")?.addEventListener("click", async () => {
+		sfx.click();
+		try { await bun().openExternal({ url: r.htmlUrl }); } catch {}
+	});
+	root.querySelector("#upd-get")?.addEventListener("click", async () => {
+		sfx.click();
+		// Notify-only mode: open the .exe asset URL (or the release page if
+		// there's no installer asset) in the browser. A future iteration can
+		// download to %TEMP% and spawn the installer directly.
+		const url = r.installerUrl ?? r.htmlUrl;
+		try { await bun().openExternal({ url }); } catch {}
+		dismissUpdateCard(false);
+	});
+}
+
 // Update the current audio effect graph: store on state, persist to disk, and
 // push to BOTH engineA and engineB so a crossfade in progress doesn't end up
 // with one engine routed through the new graph and the other through the old
@@ -586,15 +788,20 @@ async function applyNodeGraph(graph: NodeGraph | null) {
 	try {
 		await bun().savePersistedState({ key: "nodeGraph", value: graph });
 	} catch {}
-	try { engineA.setNodeGraph(graph); } catch {}
-	try { engineB.setNodeGraph(graph); } catch {}
+	try { engineA.setNodeGraph(graph); } catch (err) {
+		console.warn("[node-graph] engineA failed:", err);
+		toast(`Audio graph error: ${(err as Error).message}`, { ttl: 4000 });
+	}
+	try { engineB.setNodeGraph(graph); } catch (err) {
+		console.warn("[node-graph] engineB failed:", err);
+	}
 }
 // Expose for the node editor sibling agent. It can read state.nodeGraph and
 // call window.applyNodeGraph(g) to commit changes without importing this file.
-(window as any).applyNodeGraph = applyNodeGraph;
+window.applyNodeGraph = applyNodeGraph;
 // The node editor reaches through window.__lakkyToast so it doesn't have to
 // import this file (which would risk a circular dep at module-eval time).
-(window as any).__lakkyToast = toast;
+window.__lakkyToast = toast;
 
 // Long tracks (audiobooks, podcasts, DJ sets) deserve resume support. We
 // remember the last position for anything over 10 minutes and only restore
@@ -827,7 +1034,7 @@ function mountStripVisualizer() {
 	const canvas = document.getElementById("np-strip-canvas") as HTMLCanvasElement | null;
 	if (!canvas) return;
 	stripViz?.destroy();
-	stripViz = new Visualizer(canvas, engine.analyser, "strip");
+	stripViz = new Visualizer(canvas, monitorTap, "strip");
 	stripViz.setMaxFps(state.settings.maxFps);
 	stripViz.setIdleEnabled(state.settings.idleViz);
 	if (!engine.paused) stripViz.start();
@@ -1142,7 +1349,6 @@ async function playCurrent() {
 		engine.clearListeners();
 		engine = target;
 		attachEngineHandlers();
-		mountStripVisualizer();
 	}
 
 	engine.setVolume(state.settings.volume);
@@ -1638,7 +1844,7 @@ function renderNowPlaying(root: HTMLElement) {
 	const canvas = document.getElementById("viz-canvas") as HTMLCanvasElement | null;
 	if (canvas) {
 		visualizer?.destroy();
-		visualizer = new Visualizer(canvas, engine.analyser, "bars", state.settings.vizStyle);
+		visualizer = new Visualizer(canvas, monitorTap, "bars", state.settings.vizStyle);
 		visualizer.setMaxFps(state.settings.maxFps);
 		visualizer.setIdleEnabled(state.settings.idleViz);
 		if (t.artDataUrl) updateAccentFromArt(t.artDataUrl);
@@ -2083,11 +2289,37 @@ function renderSettings(root: HTMLElement) {
 		</div>
 
 		<div class="settings-card">
+			<h3>Updates</h3>
+			<p>Lakky checks the GitHub releases page of the repo below for newer versions. Leave the field empty to disable the updater entirely.</p>
+			<div class="setting-row">
+				<span>GitHub repo <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">Format: <code>owner/repo</code></em></span>
+				<input type="text" class="text-input" id="set-upd-repo" placeholder="owner/repo" value="${escapeHtml(s.updateRepo)}" style="min-width:220px" />
+			</div>
+			<div class="setting-row">
+				<span>Auto-check on startup <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">Also re-checks every 6 hours while the app is open.</em></span>
+				<div class="toggle ${s.autoCheckUpdates ? "on" : ""}" id="t-auto-upd"></div>
+			</div>
+			<div class="setting-row">
+				<span>Check now</span>
+				<button class="btn" id="upd-check-now" ${s.updateRepo.trim() ? "" : "disabled"}>Check for updates</button>
+			</div>
+			${s.skippedUpdateTag ? `
+				<div class="setting-row">
+					<span>Skipped version <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">You asked not to be reminded about this tag.</em></span>
+					<div style="display:flex;align-items:center;gap:.5rem">
+						<span style="color:rgba(232,232,245,.65);font-family:ui-monospace,SFMono-Regular,monospace">${escapeHtml(s.skippedUpdateTag)}</span>
+						<button class="btn btn-ghost" id="upd-unskip">Clear</button>
+					</div>
+				</div>
+			` : ""}
+		</div>
+
+		<div class="settings-card">
 			<h3>About</h3>
 			<p>Lakky — built on Electrobun + Bun.</p>
 			<div class="setting-row">
 				<span>Version</span>
-				<span style="color:rgba(232,232,245,.6)">1.0.0</span>
+				<span style="color:rgba(232,232,245,.6)">${APP_VERSION}</span>
 			</div>
 			<div class="setting-row">
 				<span>Library size</span>
@@ -2208,6 +2440,39 @@ function renderSettings(root: HTMLElement) {
 			sfx.click();
 		});
 	}
+
+	const repoInput = document.getElementById("set-upd-repo") as HTMLInputElement | null;
+	if (repoInput) {
+		const commit = () => {
+			const next = repoInput.value.trim();
+			if (next === state.settings.updateRepo) return;
+			state.settings.updateRepo = next;
+			// New repo / cleared repo → reset the skip so the user gets one
+			// fresh prompt against the new source.
+			state.settings.skippedUpdateTag = "";
+			saveSettings();
+			void startUpdateChecker();
+			renderSettings(root);
+		};
+		repoInput.addEventListener("change", commit);
+		repoInput.addEventListener("blur", commit);
+	}
+	document.getElementById("t-auto-upd")?.addEventListener("click", (e) => {
+		state.settings.autoCheckUpdates = !state.settings.autoCheckUpdates;
+		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.autoCheckUpdates);
+		saveSettings();
+		sfx.toggle();
+		void startUpdateChecker();
+	});
+	document.getElementById("upd-check-now")?.addEventListener("click", () => {
+		void manualUpdateCheck();
+	});
+	document.getElementById("upd-unskip")?.addEventListener("click", () => {
+		sfx.click();
+		state.settings.skippedUpdateTag = "";
+		saveSettings();
+		renderSettings(root);
+	});
 	for (const b of document.querySelectorAll<HTMLButtonElement>("[data-perf]")) {
 		b.addEventListener("click", () => {
 			const preset = b.dataset.perf!;
@@ -2477,14 +2742,6 @@ async function refreshLibraryFromFolder(path: string) {
 }
 
 // ---------- Misc ----------
-function escapeHtml(s: string): string {
-	return s
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&#39;");
-}
 
 // ---------- Global hotkeys ----------
 // Save bookmark on app exit / window unload for the long tracks.
@@ -2851,6 +3108,7 @@ function ctxItemsForTrack(t: TrackInfo): CtxItem[] {
 	applyTheme();
 	render();
 	installTooltips();
+	void startUpdateChecker();
 	engine.setEq(state.settings.eq);
 	engine.setVolume(state.settings.volume);
 	engine.setRate(state.settings.speed);

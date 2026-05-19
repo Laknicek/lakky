@@ -7,7 +7,6 @@ import {
 } from "electrobun/bun";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import type { PlayerRPC, TrackInfo, SharedPlayerState, ExternalCommand } from "../shared/rpcSchema";
 import {
 	buildTrackInfo,
@@ -19,6 +18,8 @@ import { startMediaServer } from "./mediaServer";
 import { onDiscordStatus, setDiscordPresence } from "./discord";
 import { readM3U, writeM3U } from "./m3u";
 import { startWebRemote, stopWebRemote } from "./webRemote";
+import { appDataDir, LAKKY_APP_DATA } from "./paths";
+import { fetchLatestRelease } from "./updater";
 
 const DEV_SERVER_PORT = 5173;
 const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
@@ -42,34 +43,8 @@ async function getMainViewUrl(): Promise<string> {
 // Local persistence — small JSON store in a stable OS app-data location so
 // settings, the library folder, playlists, and play counts survive across
 // Electrobun rebuilds (which would wipe anything stored inside build/).
-function appDataDir(): string {
-	const name = "Lakky";
-	if (process.platform === "win32") {
-		const roaming = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
-		return join(roaming, name);
-	}
-	if (process.platform === "darwin") {
-		return join(homedir(), "Library", "Application Support", name);
-	}
-	return join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), name);
-}
-
 function persistPath(): string {
-	return join(appDataDir(), "state.json");
-}
-
-// Returns the equivalent app-data path for a given app name on the current OS.
-// Used to find state from previous incarnations of the app for one-time
-// migration.
-function legacyAppDataDir(name: string): string {
-	if (process.platform === "win32") {
-		const roaming = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
-		return join(roaming, name);
-	}
-	if (process.platform === "darwin") {
-		return join(homedir(), "Library", "Application Support", name);
-	}
-	return join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), name);
+	return join(appDataDir(LAKKY_APP_DATA), "state.json");
 }
 
 // One-time migration: if our current state file doesn't exist but one from
@@ -80,7 +55,7 @@ function migrateLegacyState() {
 	if (existsSync(target)) return;
 	const legacyNames = ["LAK Player", "lak-player"];
 	for (const name of legacyNames) {
-		const legacy = join(legacyAppDataDir(name), "state.json");
+		const legacy = join(appDataDir(name), "state.json");
 		if (existsSync(legacy)) {
 			try {
 				mkdirSync(dirname(target), { recursive: true });
@@ -142,9 +117,8 @@ console.log(`Media server listening on ${streamBase}`);
 async function ingestOne(
 	srcPath: string,
 	libraryFolder: string | null,
-	includeArt: boolean,
 ): Promise<TrackInfo> {
-	const initial = await buildTrackInfo(srcPath, streamBase, includeArt);
+	const initial = await buildTrackInfo(srcPath, streamBase);
 	if (!libraryFolder) return initial;
 	try {
 		const { path: finalPath } = await copyIntoLibrary(srcPath, libraryFolder, {
@@ -154,7 +128,7 @@ async function ingestOne(
 			trackNumber: initial.trackNumber,
 		});
 		if (finalPath !== srcPath) {
-			return await buildTrackInfo(finalPath, streamBase, includeArt);
+			return await buildTrackInfo(finalPath, streamBase);
 		}
 		return initial;
 	} catch (err) {
@@ -216,7 +190,7 @@ function makePlayerRPC() {
 					const root = paths[0];
 					let scanned = 0;
 					for await (const p of walkMedia(root)) {
-						const info = await ingestOne(p, libraryFolder, scanned < 200);
+						const info = await ingestOne(p, libraryFolder);
 						tracks.push(info);
 						scanned++;
 						if (scanned % 5 === 0) {
@@ -231,7 +205,7 @@ function makePlayerRPC() {
 					let idx = 0;
 					for (const p of paths) {
 						if (!classifyFile(p)) continue;
-						const info = await ingestOne(p, libraryFolder, true);
+						const info = await ingestOne(p, libraryFolder);
 						tracks.push(info);
 						idx++;
 						mainWindow.webview.rpc?.send.copyProgress({
@@ -249,7 +223,7 @@ function makePlayerRPC() {
 				const tracks: TrackInfo[] = [];
 				let scanned = 0;
 				for await (const p of walkMedia(path)) {
-					const info = await ingestOne(p, libraryFolder, scanned < 200);
+					const info = await ingestOne(p, libraryFolder);
 					tracks.push(info);
 					scanned++;
 					if (scanned % 5 === 0) {
@@ -280,6 +254,11 @@ function makePlayerRPC() {
 			clearLibraryFolder: () => {
 				setLibraryFolder(null);
 				return { ok: true };
+			},
+
+			checkLatestRelease: async ({ repo }) => {
+				const release = await fetchLatestRelease(repo);
+				return { release };
 			},
 
 			setDiscordPresence: async ({ presence }) => {
@@ -482,12 +461,14 @@ function makePlayerRPC() {
 						const s = await import("node:fs/promises").then((m) => m.stat(p));
 						if (s.isDirectory()) {
 							for await (const file of walkMedia(p)) {
-								out.push(await ingestOne(file, libraryFolder, out.length < 200));
+								out.push(await ingestOne(file, libraryFolder));
 							}
 						} else if (classifyFile(p)) {
-							out.push(await ingestOne(p, libraryFolder, true));
+							out.push(await ingestOne(p, libraryFolder));
 						}
-					} catch {}
+					} catch (err) {
+						console.warn(`[library] skipped ${p}:`, (err as Error).message);
+					}
 				}
 				return { tracks: out };
 			},
@@ -513,7 +494,7 @@ function makePlayerRPC() {
 				for (const p of filePaths) {
 					if (!existsSync(p)) continue;
 					if (!classifyFile(p)) continue;
-					tracks.push(await ingestOne(p, libraryFolder, tracks.length < 200));
+					tracks.push(await ingestOne(p, libraryFolder));
 				}
 				// Use the filename minus extension as the playlist name.
 				const name = playlistPath

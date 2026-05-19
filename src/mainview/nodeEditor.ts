@@ -14,6 +14,7 @@ import {
 	type NodeType,
 } from "./nodes";
 import { NODE_TEMPLATES } from "./nodeTemplates";
+import { escapeHtml } from "./util";
 
 type ToastFn = (msg: string, opts?: { ttl?: number; key?: string }) => void;
 
@@ -23,8 +24,8 @@ let _toast: ToastFn = (m) => console.log("[node-editor]", m);
 // load time. If main.ts exposes window.__lakkyToast we use it; otherwise we
 // fall back to console.
 function getToast(): ToastFn {
-	const fn = (window as any).__lakkyToast;
-	if (typeof fn === "function") return fn as ToastFn;
+	const fn = window.__lakkyToast;
+	if (typeof fn === "function") return fn;
 	return _toast;
 }
 
@@ -37,14 +38,6 @@ function clone(g: NodeGraph): NodeGraph {
 		nodes: g.nodes.map((n) => ({ ...n, params: { ...n.params } })),
 		edges: g.edges.map((e) => ({ ...e })),
 	};
-}
-
-function escapeHtml(s: string): string {
-	return s
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
 }
 
 const NODE_W = 200;

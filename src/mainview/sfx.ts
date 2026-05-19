@@ -6,7 +6,7 @@ let enabled = true;
 
 function ensureCtx(): AudioContext {
 	if (!ctx) {
-		ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+		ctx = new (window.AudioContext || window.webkitAudioContext!)();
 		masterGain = ctx.createGain();
 		masterGain.gain.value = 0.18;
 		masterGain.connect(ctx.destination);
@@ -17,10 +17,6 @@ function ensureCtx(): AudioContext {
 
 export function setSfxEnabled(on: boolean) {
 	enabled = on;
-}
-
-export function isSfxEnabled() {
-	return enabled;
 }
 
 type ToneOpts = {

@@ -2,33 +2,20 @@ import { readdir, stat, mkdir, copyFile, writeFile } from "node:fs/promises";
 import { join, extname, basename, dirname, sep, normalize } from "node:path";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
 import { parseFile } from "music-metadata";
-import type { TrackInfo } from "../shared/rpcSchema";
+import type { TrackInfo, MediaKind } from "../shared/rpcSchema";
+import { appDataDir, LAKKY_APP_DATA } from "./paths";
 
 // ---------- Cover-art cache on disk ----------
-// Extracting embedded art on every track and shoving it inline as a data URL
-// (the old approach) was both slow on big libraries and far too big to persist
-// in state.json — which is why the old code only kept art for the first 200
-// tracks. We now write each cover to <appData>/Lakky/art/<id>.<ext> and just
-// store the URL, so:
-//   • every track in the library has its art (no 200-track cutoff)
-//   • state.json stays small
-//   • restarts pick up cached art instantly, no rescan needed
+// Each cover is written to <appData>/Lakky/art/<id>.<ext> and only the URL
+// lives in state.json. Inlining art as base64 would bloat state.json past
+// disk-readable size on a large library; on-disk storage keeps state.json
+// small and lets every track keep its art instead of capping at N covers.
 
 let _artDirCache: string | null = null;
 export function artCacheDir(): string {
 	if (_artDirCache) return _artDirCache;
-	const appName = "Lakky";
-	let base: string;
-	if (process.platform === "win32") {
-		base = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
-	} else if (process.platform === "darwin") {
-		base = join(homedir(), "Library", "Application Support");
-	} else {
-		base = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-	}
-	_artDirCache = join(base, appName, "art");
+	_artDirCache = join(appDataDir(LAKKY_APP_DATA), "art");
 	return _artDirCache;
 }
 
@@ -91,7 +78,7 @@ const VIDEO_EXTS = new Set([
 	".mts", ".m2ts", ".ogv", ".vob", ".rm", ".rmvb",
 ]);
 
-export function classifyFile(path: string): "audio" | "video" | null {
+export function classifyFile(path: string): MediaKind | null {
 	const ext = extname(path).toLowerCase();
 	if (AUDIO_EXTS.has(ext)) return "audio";
 	if (VIDEO_EXTS.has(ext)) return "video";
@@ -197,7 +184,6 @@ export async function copyIntoLibrary(
 export async function buildTrackInfo(
 	filePath: string,
 	streamBase: string,
-	_legacyIncludeArtIgnored = true,
 ): Promise<TrackInfo> {
 	const kind = classifyFile(filePath) ?? "audio";
 	const stats = await stat(filePath);

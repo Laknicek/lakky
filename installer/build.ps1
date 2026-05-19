@@ -1,7 +1,7 @@
 # Builds a distributable Lakky installer end-to-end.
 #
 #   1. Bundles the renderer + Bun main process via `bun run build`
-#       → output: build/win-x64/Lakky/
+#       → output: build/stable-win-x64/Lakky/
 #   2. Re-renders the wizard branding images.
 #   3. Invokes the Inno Setup compiler.
 #       → output: artifacts/Lakky-Setup-1.0.0.exe

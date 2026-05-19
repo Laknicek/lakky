@@ -52,7 +52,7 @@ Name: "associate_video"; Description: "Associate &video files (.mp4 .mkv .webm .
 
 [Files]
 ; Whole Electrobun bundle — bin/, Resources/, the lot.
-Source: "..\build\win-x64\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\build\stable-win-x64\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}";          Filename: "{app}\{#MyAppExePath}"; WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\launcher.exe"

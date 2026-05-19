@@ -1,10 +1,29 @@
 import type { RPCSchema } from "electrobun/bun";
 
+// Audio file vs video file. Used across the library and player state.
+export type MediaKind = "audio" | "video";
+
+// Player loop modes. "all" loops the queue; "one" loops the current track.
+export type RepeatMode = "off" | "all" | "one";
+
+// Shape returned by checkLatestRelease. `installerUrl` is the first .exe
+// asset on the release, when present.
+export type LatestReleaseInfo = {
+	tag: string;
+	version: string;
+	name: string;
+	notes: string;
+	htmlUrl: string;
+	publishedAt: string;
+	installerUrl: string | null;
+	installerName: string | null;
+};
+
 export type TrackInfo = {
 	id: string;
 	path: string;
 	streamUrl: string;
-	kind: "audio" | "video";
+	kind: MediaKind;
 	title: string;
 	artist: string;
 	album: string;
@@ -165,6 +184,14 @@ export type PlayerRPC = {
 				params: {};
 				response: { ok: boolean };
 			};
+			// Polls GitHub releases for `<owner/repo>` and returns the latest
+			// public, non-draft release (or null if the repo has none yet).
+			// Network failures bubble up as a thrown RPC error so the
+			// renderer can show a sensible toast.
+			checkLatestRelease: {
+				params: { repo: string };
+				response: { release: LatestReleaseInfo | null };
+			};
 		};
 		messages: {};
 	}>;
@@ -202,12 +229,12 @@ export type SharedPlayerState = {
 		album: string;
 		duration: number;
 		artUrl: string | null;
-		kind: "audio" | "video";
+		kind: MediaKind;
 	} | null;
 	currentTime: number;
 	paused: boolean;
 	volume: number;
 	shuffle: boolean;
-	repeat: "off" | "all" | "one";
+	repeat: RepeatMode;
 	queueLen: number;
 };

@@ -1,7 +1,7 @@
-import type { TrackInfo } from "../shared/rpcSchema";
+import type { TrackInfo, RepeatMode } from "../shared/rpcSchema";
 import { compileGraph, type NodeGraph } from "./nodes";
 
-export type RepeatMode = "off" | "all" | "one";
+export type { RepeatMode };
 
 export const EQ_BANDS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000] as const;
 
@@ -33,7 +33,11 @@ export class AudioEngine {
 	private source: MediaElementAudioSourceNode | null = null;
 	private filters: BiquadFilterNode[] = [];
 	private gain: GainNode;
-	analyser: AnalyserNode;
+	// Stable downstream tap point. Visualizers attach their own AnalyserNodes
+	// to this so every analyser sees fresh per-frame data instead of
+	// double-smoothed reads. Defaults to ctx.destination when no shared tap
+	// is supplied.
+	monitorTap: AudioNode;
 	private cb: AudioEngineEvents = {};
 	private fadeRaf: number | null = null;
 	private graphConnected = false;
@@ -52,26 +56,20 @@ export class AudioEngine {
 	private trackCount = 0;
 	private trackTimes: number[] = []; // wall-clock ms when each play started, for stats
 
-	// When `sharedAnalyser` is passed all engines route their output through
-	// the same AnalyserNode. The visualizer reads from that one node, which
-	// means crossfades, engine swaps, and audio↔video transitions don't leave
-	// it staring at a silent (now-inactive) engine's tap.
-	constructor(media: HTMLMediaElement, sharedCtx?: AudioContext, sharedAnalyser?: AnalyserNode) {
+	// When a shared `monitorTap` is provided, every engine routes through it
+	// instead of straight to ctx.destination. Visualizers can then build their
+	// own AnalyserNodes off that single tap — engine swaps, crossfades, and
+	// audio↔video transitions all stay live without any rebuild of the visual
+	// path. When no tap is provided we just send to ctx.destination directly.
+	constructor(media: HTMLMediaElement, sharedCtx?: AudioContext, monitorTap?: AudioNode) {
 		this.media = media;
 		this.media.crossOrigin = "anonymous";
 		this.ctx =
-			sharedCtx ?? new (window.AudioContext || (window as any).webkitAudioContext)();
+			sharedCtx ?? new (window.AudioContext || window.webkitAudioContext!)();
 
 		this.gain = this.ctx.createGain();
 		this.gain.gain.value = 1;
-
-		if (sharedAnalyser) {
-			this.analyser = sharedAnalyser;
-		} else {
-			this.analyser = this.ctx.createAnalyser();
-			this.analyser.fftSize = 2048;
-			this.analyser.smoothingTimeConstant = 0.78;
-		}
+		this.monitorTap = monitorTap ?? this.ctx.destination;
 
 		for (const f of EQ_BANDS) {
 			const filter = this.ctx.createBiquadFilter();
@@ -99,7 +97,7 @@ export class AudioEngine {
 	private ensureGraph() {
 		if (this.graphConnected) return;
 		this.source = this.ctx.createMediaElementSource(this.media);
-		this.gain.connect(this.analyser);
+		this.gain.connect(this.monitorTap);
 		this.wireMiddle();
 		this.graphConnected = true;
 	}
@@ -196,10 +194,6 @@ export class AudioEngine {
 		);
 	}
 
-	getVolume() {
-		return this.gain.gain.value;
-	}
-
 	// playbackRate maps directly. preservesPitch (default true in Chromium) keeps
 	// the music in key at non-1× speeds — important for audiobooks/podcasts.
 	setRate(r: number) {
@@ -209,10 +203,6 @@ export class AudioEngine {
 			(this.media as any).preservesPitch = true;
 			(this.media as any).webkitPreservesPitch = true;
 		} catch {}
-	}
-
-	getRate() {
-		return this.media.playbackRate;
 	}
 
 	async loadAndPlay(track: TrackInfo) {

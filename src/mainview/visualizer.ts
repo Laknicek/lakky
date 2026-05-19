@@ -28,14 +28,23 @@ export class Visualizer {
 	private lastFrameTime = 0;
 	private idleEnabled = true;
 
-	constructor(canvas: HTMLCanvasElement, analyser: AnalyserNode, mode: VizMode = "bars", style: VizStyle = "bars") {
+	// Each Visualizer owns its own AnalyserNode tapped off the caller-supplied
+	// `source` (typically the shared monitorTap downstream of every audio
+	// engine's gain). Owning the analyser means two visualizers on the same
+	// screen don't double-smooth a shared analyser by reading it twice per
+	// frame — each gets its own internal smoothing state.
+	constructor(canvas: HTMLCanvasElement, source: AudioNode, mode: VizMode = "bars", style: VizStyle = "bars") {
 		this.style = style;
 		this.canvas = canvas;
 		this.ctx2d = canvas.getContext("2d", { alpha: true })!;
-		this.analyser = analyser;
-		// The analyser is owned externally now (one shared node across all
-		// engines). We don't mutate fftSize/decibel/smoothing here — that's
-		// the audio layer's responsibility. We only read it.
+		// 2048 bins → ~21.5 Hz per bin at 44.1 kHz. Enough resolution to
+		// separate sub-bass / bass / low-mids without adding visible latency.
+		this.analyser = source.context.createAnalyser();
+		this.analyser.fftSize = 2048;
+		this.analyser.smoothingTimeConstant = 0.72;
+		this.analyser.minDecibels = -90;
+		this.analyser.maxDecibels = -20;
+		source.connect(this.analyser);
 		this.mode = mode;
 		this.data = new Uint8Array(this.analyser.frequencyBinCount);
 		this.timeData = new Uint8Array(this.analyser.fftSize);
@@ -69,6 +78,7 @@ export class Visualizer {
 		this.stop();
 		window.removeEventListener("resize", this.resizeHandler);
 		this.resizeObserver.disconnect();
+		try { this.analyser.disconnect(); } catch {}
 	}
 
 	setAccent(rgb: [number, number, number]) {
