@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Lakky · Mini</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap"
+			rel="stylesheet"
+		/>
+	</head>
+	<body class="mini-body">
+		<header class="mini-titlebar">
+			<span class="mini-name">Lakky</span>
+			<div class="mini-drag"></div>
+			<button class="tb-btn mini-restore" id="mini-restore" title="Back to full app" aria-label="Back to full app">
+				<svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M9 2h3v3M5 12H2V9M12 2 8 6M2 12l4-4" />
+				</svg>
+			</button>
+		</header>
+		<main class="mini-stage">
+			<div class="mini-art" id="mini-art"></div>
+			<div class="mini-info">
+				<div class="mini-title" id="mini-title">Nothing playing</div>
+				<div class="mini-sub" id="mini-sub">—</div>
+			</div>
+			<div class="mini-scrub" id="mini-scrub">
+				<div class="mini-fill" id="mini-fill"></div>
+			</div>
+			<div class="mini-times">
+				<span id="mini-cur">0:00</span>
+				<span id="mini-dur">0:00</span>
+			</div>
+			<div class="mini-buttons">
+				<button class="icon-btn" id="mini-shuffle" title="Shuffle">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5M21 3l-7 7M4 20l16-16M4 4l5 5M16 21h5v-5M15 15l6 6"/></svg>
+				</button>
+				<button class="icon-btn" id="mini-prev" title="Previous">
+					<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9 12l10-7v14z"/></svg>
+				</button>
+				<button class="icon-btn play" id="mini-play" title="Play / pause">
+					<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+				</button>
+				<button class="icon-btn" id="mini-next" title="Next">
+					<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM5 5v14l10-7z"/></svg>
+				</button>
+				<button class="icon-btn" id="mini-repeat" title="Repeat">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+				</button>
+			</div>
+			<div class="mini-volume" style="display:flex;align-items:center;gap:0.45rem;width:100%;margin-top:0.2rem;">
+				<span style="opacity:.55;display:inline-flex;color:rgba(232,232,245,0.6)">
+					<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>
+				</span>
+				<input type="range" id="mini-volume" class="range wide" min="0" max="100" value="100" data-tip="Volume" title="Volume" />
+			</div>
+			<div class="mini-extras" style="display:flex;align-items:center;gap:0.4rem;margin-top:0.1rem;">
+				<button class="icon-btn" id="mini-eq" data-tip="Equalizer (open main)" title="Equalizer (open main)" aria-label="Equalizer">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>
+				</button>
+				<button class="icon-btn" id="mini-tray" data-tip="Send to tray" title="Send to tray" aria-label="Send to tray">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14h4l2 3h6l2-3h4"/><path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>
+				</button>
+			</div>
+		</main>
+		<script type="module" src="/mini.ts"></script>
+	</body>
+</html>

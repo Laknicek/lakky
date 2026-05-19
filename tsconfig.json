@@ -1,0 +1,15 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "ESNext",
+		"strict": true,
+		"moduleResolution": "bundler",
+		"customConditions": ["node"],
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"types": ["bun"]
+	},
+	"include": ["src", "src/shims.d.ts"],
+	"exclude": ["node_modules", "dist", "build"]
+}

@@ -1,0 +1,30 @@
+{
+	"name": "lakky",
+	"version": "1.0.0",
+	"type": "module",
+	"description": "Lakky — a stunning modern media player built on Electrobun + Bun.",
+	"scripts": {
+		"start": "vite build && electrobun dev",
+		"dev": "electrobun dev --watch",
+		"dev:hmr": "concurrently \"bun run hmr\" \"bun run start\"",
+		"hmr": "vite --port 5173",
+		"build": "vite build && electrobun build && bun scripts/embed-icon.ts",
+		"build:canary": "vite build && electrobun build --env=canary && bun scripts/embed-icon.ts",
+		"icon": "bun scripts/make-icon.ts",
+		"icon:embed": "bun scripts/embed-icon.ts"
+	},
+	"dependencies": {
+		"electrobun": "^1.18.1",
+		"music-metadata": "^10.6.4"
+	},
+	"devDependencies": {
+		"@tailwindcss/vite": "^4.0.0",
+		"@types/bun": "latest",
+		"concurrently": "^9.1.0",
+		"rcedit": "^5.0.2",
+		"sharp": "^0.34.5",
+		"tailwindcss": "^4.0.0",
+		"typescript": "^5.7.2",
+		"vite": "^6.0.3"
+	}
+}

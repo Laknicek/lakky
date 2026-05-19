@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Lakky</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap"
+			rel="stylesheet"
+		/>
+	</head>
+	<body>
+		<header id="titlebar" class="titlebar">
+			<div class="tb-brand">
+				<span class="tb-logo" id="tb-logo"></span>
+				<span class="tb-name">Lakky</span>
+			</div>
+			<div class="tb-drag"></div>
+			<div class="tb-controls">
+				<button class="tb-btn" id="tb-min" title="Minimize" aria-label="Minimize">
+					<svg viewBox="0 0 12 12" width="12" height="12"><path d="M2 6 H10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+				</button>
+				<button class="tb-btn" id="tb-max" title="Maximize" aria-label="Maximize">
+					<svg viewBox="0 0 12 12" width="12" height="12"><rect x="2.5" y="2.5" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+				</button>
+				<button class="tb-btn tb-close" id="tb-close" title="Close" aria-label="Close">
+					<svg viewBox="0 0 12 12" width="12" height="12"><path d="M3 3 L9 9 M9 3 L3 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+				</button>
+			</div>
+		</header>
+
+		<div id="splash" class="splash">
+			<div class="splash-inner">
+				<div class="splash-bar"><span></span></div>
+				<p class="splash-step" id="splash-step">Loading…</p>
+			</div>
+		</div>
+
+		<div id="app" class="app-root hidden"></div>
+
+		<script type="module" src="/main.ts"></script>
+	</body>
+</html>
