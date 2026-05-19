@@ -206,11 +206,23 @@ export class AudioEngine {
 	}
 
 	async loadAndPlay(track: TrackInfo) {
-		if (this.ctx.state === "suspended") await this.ctx.resume();
+		// Chromium intensively throttles WebView2 when the window is minimized.
+		// The AudioContext can be in "suspended" or "interrupted" the moment we
+		// swap media.src — without a resume here the new track plays silently
+		// until the user re-focuses. Cover both non-"running" states.
+		if (this.ctx.state !== "running") {
+			try { await this.ctx.resume(); } catch {}
+		}
 		this.ensureGraph();
 		this.media.src = track.streamUrl;
 		try {
 			await this.media.play();
+			// Some browsers transition the context to suspended *during* the
+			// play() call when the page is hidden. One more nudge after play
+			// is cheap insurance.
+			if (this.ctx.state !== "running") {
+				try { await this.ctx.resume(); } catch {}
+			}
 			this.trackCount++;
 			this.trackTimes.push(Date.now());
 		} catch (err) {

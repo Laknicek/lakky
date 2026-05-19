@@ -565,17 +565,19 @@ const rpc = makePlayerRPC();
 const url = await getMainViewUrl();
 
 // Frameless 16:9 window — custom titlebar lives in the renderer.
-// 1280 × 720 inner content gives a clean 16:9 aspect that fits on 1080p screens.
+// 1480 × 860 is a comfortable default that gives the library grid two extra
+// columns and the equalizer enough breathing room, while still fitting on
+// a 1440p screen with the taskbar visible. Users can resize freely.
 mainWindow = new BrowserWindow({
 	title: "Lakky",
 	url,
 	rpc,
 	titleBarStyle: "hidden",
 	frame: {
-		width: 1280,
-		height: 720,
-		x: 120,
-		y: 80,
+		width: 1480,
+		height: 860,
+		x: 100,
+		y: 60,
 	},
 });
 

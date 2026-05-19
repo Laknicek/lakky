@@ -274,6 +274,32 @@ const engineA = new AudioEngine(audioElA, sharedAudioCtx, monitorTap);
 const engineB = new AudioEngine(audioElB, sharedAudioCtx, monitorTap);
 const videoEngine = new AudioEngine(videoEl, sharedAudioCtx, monitorTap);
 
+// Keep the AudioContext alive while the user expects playback. Chromium
+// intensively throttles minimized WebView2 windows — the context can drop
+// to "suspended" or "interrupted" when the next track loads, which makes
+// the song play silently until the user re-focuses the window. The
+// watchdog catches this; the visibilitychange/focus listeners catch it
+// the moment the user comes back.
+function ensureAudioRunning() {
+	if (sharedAudioCtx.state !== "running") {
+		sharedAudioCtx.resume().catch(() => {});
+	}
+}
+sharedAudioCtx.addEventListener("statechange", ensureAudioRunning);
+document.addEventListener("visibilitychange", ensureAudioRunning);
+window.addEventListener("focus", ensureAudioRunning);
+setInterval(() => {
+	// Only nudge while some engine should be playing — otherwise leave the
+	// context suspended so it doesn't burn CPU.
+	if (
+		!engineA.media.paused ||
+		!engineB.media.paused ||
+		!videoEngine.media.paused
+	) {
+		ensureAudioRunning();
+	}
+}, 2000);
+
 let crossfading = false;
 let crossfadeRaf: number | null = null;
 
