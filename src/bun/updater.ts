@@ -1,8 +1,14 @@
-// GitHub Releases poller. Given an "owner/repo" string, hits the public
-// /releases/latest endpoint and returns a normalized record the renderer can
-// show in an "Update available" card. Pure network call — no downloads, no
-// installer side effects. The renderer compares versions and decides what to
-// show; we just transport.
+// GitHub Releases poller + installer download + silent install spawn.
+// Given an "owner/repo" string, fetchLatestRelease hits /releases/latest and
+// returns a normalized record the renderer can show in an "Update available"
+// card. downloadInstaller streams the .exe to %TEMP% with progress callbacks.
+// spawnInstallerAndQuit runs Inno Setup silently and exits the process so
+// the installer can replace launcher.exe without a file-lock fight.
+
+import { createWriteStream, existsSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 export type LatestRelease = {
 	tag: string;            // raw tag, e.g. "v1.2.0"
@@ -92,4 +98,62 @@ export async function fetchLatestRelease(repo: string): Promise<LatestRelease | 
 		installerUrl: exeAsset?.browser_download_url ?? null,
 		installerName: exeAsset?.name ?? null,
 	};
+}
+
+// Stream a release asset to %TEMP%\lakky-updates\<filename>. `onProgress` is
+// called once per chunk with bytes received so far. Total is -1 if the server
+// omitted Content-Length. Returns the absolute path of the written file.
+export async function downloadInstaller(
+	url: string,
+	filename: string,
+	onProgress: (received: number, total: number) => void,
+): Promise<string> {
+	const dir = join(tmpdir(), "lakky-updates");
+	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+	const dest = join(dir, filename);
+
+	const res = await fetch(url, {
+		headers: { "User-Agent": "Lakky-Updater" },
+		redirect: "follow",
+	});
+	if (!res.ok || !res.body) {
+		throw new Error(`Download failed: ${res.status} ${res.statusText}`);
+	}
+	const total = Number(res.headers.get("content-length") ?? -1);
+	const out = createWriteStream(dest);
+	let received = 0;
+	const reader = res.body.getReader();
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			received += value.length;
+			out.write(value);
+			onProgress(received, total);
+		}
+	} finally {
+		await new Promise<void>((resolve, reject) => {
+			out.end((err: Error | null | undefined) => (err ? reject(err) : resolve()));
+		});
+	}
+	return dest;
+}
+
+// Spawn the installer with the silent flags and detach so it survives this
+// process exiting. Inno Setup's /VERYSILENT skips every wizard page;
+// /SUPPRESSMSGBOXES auto-clicks any info dialogs; /NORESTART forbids a system
+// reboot; the lakky.iss `[Run]` section auto-launches the new build when it
+// detects a silent install. We exit immediately after spawning so the
+// installer can replace launcher.exe without a file-in-use error.
+export function spawnInstallerAndQuit(installerPath: string): void {
+	const child = spawn(
+		installerPath,
+		["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+		{ detached: true, stdio: "ignore" },
+	);
+	child.unref();
+	// Give the spawn a tick to actually start before we tear down. Without
+	// this, on very fast machines `process.exit(0)` has been observed to
+	// orphan the spawn before Windows registers it.
+	setTimeout(() => process.exit(0), 250);
 }

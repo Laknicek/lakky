@@ -3,7 +3,7 @@
 ; Build:  iscc installer\lakky.iss   (after `bun run build`)
 
 #define MyAppName        "Lakky"
-#define MyAppVersion     "1.0.1"
+#define MyAppVersion     "1.0.2"
 #define MyAppPublisher   "Laknicek"
 #define MyAppURL         "https://github.com/Laknicek/lakky"
 #define MyAppExeName     "launcher.exe"
@@ -84,7 +84,12 @@ Root: HKA; Subkey: "Software\Classes\Lakky.VideoFile\DefaultIcon"; ValueType: st
 Root: HKA; Subkey: "Software\Classes\Lakky.VideoFile\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExePath}"" ""%1"""; Tasks: associate_video
 
 [Run]
+; Interactive install — shows a "Launch Lakky" checkbox on the final wizard page.
 Filename: "{app}\{#MyAppExePath}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; Silent / very-silent install — auto-launches the new build. Used by the
+; in-app updater so the user goes from "click install" to a running new
+; version with no further interaction.
+Filename: "{app}\{#MyAppExePath}"; Flags: nowait skipifnotsilent
 
 [Code]
 var

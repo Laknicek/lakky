@@ -37,6 +37,9 @@ const rpc = Electroview.defineRPC<PlayerRPC>({
 			windowStateChanged: ({ hidden }) => {
 				setRendererHidden(hidden);
 			},
+			updateDownloadProgress: ({ received, total }) => {
+				onDownloadProgress(received, total);
+			},
 			externalCommand: ({ action, value }) => {
 				applyExternalCommand(action, value);
 			},
@@ -137,7 +140,7 @@ const state = {
 
 // Mirrors package.json so we have something to compare release tags against
 // without bundling the JSON. Bump in lockstep on every release.
-const APP_VERSION = "1.0.1";
+const APP_VERSION = "1.0.2";
 
 // ---------- DOM ----------
 const splashEl = document.getElementById("splash")!;
@@ -701,113 +704,222 @@ async function startUpdateChecker() {
 	}
 	if (!state.settings.updateRepo.trim()) return;
 	if (!state.settings.autoCheckUpdates) return;
-	const run = async () => {
-		try {
-			const release = await fetchUpdateIfNewer(true);
-			if (release) showUpdateCard(release);
-		} catch (err) {
-			// Network / rate-limit failures are normal — keep the poll
-			// going but log so it's visible in devtools.
-			console.warn("[updater] check failed:", (err as Error).message);
-		}
-	};
-	// First check 5s after boot so the splash and library scan finish first.
-	// Then every 6 hours.
-	setTimeout(run, 5000);
-	updateCheckTimer = setInterval(run, 6 * 60 * 60 * 1000);
+	// Boot-time check shows the modal popup (visible "checking → result" UX).
+	// Subsequent periodic checks are silent and only surface if they actually
+	// find an update, so the user isn't pestered every 6 hours.
+	setTimeout(() => runUpdateCheck("boot"), 4000);
+	updateCheckTimer = setInterval(() => runUpdateCheck("background"), 6 * 60 * 60 * 1000);
 }
 
 async function manualUpdateCheck() {
 	sfx.click();
-	toast("Checking for updates…", { ttl: 1600, key: "upd" });
+	void runUpdateCheck("manual");
+}
+
+// Drives the boot popup + the manual settings button. `kind` controls how
+// the "no update found" outcome surfaces:
+//   - boot:       brief checking pill that auto-dismisses if up-to-date
+//   - manual:     full modal, "you're up to date" message lingers ~2s
+//   - background: silent unless an update is actually found
+async function runUpdateCheck(kind: "boot" | "manual" | "background") {
+	if (kind !== "background") {
+		setUpdateState({ phase: "checking" });
+	}
 	try {
-		const release = await fetchUpdateIfNewer(false);
-		if (release) showUpdateCard(release);
+		const release = await fetchUpdateIfNewer(true);
+		if (release) {
+			setUpdateState({ phase: "available", release });
+		} else if (kind === "manual") {
+			setUpdateState({ phase: "up-to-date" });
+			setTimeout(closeUpdateModal, 2400);
+		} else if (kind === "boot") {
+			closeUpdateModal();
+		}
 	} catch (err) {
-		toast(`Update check failed: ${(err as Error).message}`, { ttl: 3200 });
-		sfx.error();
+		if (kind === "background") {
+			console.warn("[updater] check failed:", (err as Error).message);
+			return;
+		}
+		setUpdateState({ phase: "error", message: (err as Error).message });
 	}
 }
 
-function showUpdateCard(release: LatestReleaseInfo) {
-	state.pendingUpdate = release;
-	renderUpdateCard();
+// ----- Update modal state machine -----
+type UpdatePhase =
+	| { phase: "checking" }
+	| { phase: "up-to-date" }
+	| { phase: "available"; release: LatestReleaseInfo }
+	| { phase: "downloading"; release: LatestReleaseInfo; received: number; total: number }
+	| { phase: "installing"; release: LatestReleaseInfo }
+	| { phase: "error"; message: string };
+
+let updateUi: UpdatePhase | null = null;
+
+function setUpdateState(next: UpdatePhase) {
+	updateUi = next;
+	if (next.phase === "available") state.pendingUpdate = next.release;
+	renderUpdateModal();
 }
 
-function dismissUpdateCard(skip: boolean) {
-	const release = state.pendingUpdate;
-	state.pendingUpdate = null;
-	const el = document.getElementById("update-card");
+function closeUpdateModal() {
+	const prev = updateUi;
+	updateUi = null;
+	const el = document.getElementById("update-modal");
 	if (el) {
-		el.classList.add("update-card-out");
-		setTimeout(() => el.remove(), 380);
+		el.classList.add("update-modal-out");
+		setTimeout(() => el.remove(), 320);
 	}
-	if (skip && release) {
-		state.settings.skippedUpdateTag = release.tag;
-		void saveSettings();
+	if (prev?.phase === "available") state.pendingUpdate = null;
+}
+
+function onDownloadProgress(received: number, total: number) {
+	if (updateUi?.phase !== "downloading") return;
+	updateUi = { ...updateUi, received, total };
+	const bar = document.getElementById("upd-bar-fill") as HTMLDivElement | null;
+	const txt = document.getElementById("upd-bar-text");
+	if (bar && total > 0) bar.style.width = `${Math.min(100, (received / total) * 100)}%`;
+	if (txt) {
+		const mb = (n: number) => (n / 1048576).toFixed(1);
+		txt.textContent = total > 0
+			? `${mb(received)} / ${mb(total)} MB`
+			: `${mb(received)} MB`;
 	}
 }
 
-function renderUpdateCard() {
-	document.getElementById("update-card")?.remove();
-	const r = state.pendingUpdate;
-	if (!r) return;
-	const notes = (r.notes || "No release notes provided.").trim();
-	// Hard truncate the body — full notes live on the release page.
-	const notesPreview = notes.length > 480 ? notes.slice(0, 477) + "…" : notes;
-	const html = `
-		<div class="update-card-glow"></div>
-		<div class="update-card-body">
-			<div class="update-card-head">
-				<div class="update-pill"><span class="update-pill-dot"></span>NEW VERSION</div>
-				<button class="update-x" id="upd-close" aria-label="Dismiss" data-tip="Remind me later">×</button>
-			</div>
-			<div class="update-versions">
-				<span class="update-from">v${escapeHtml(APP_VERSION)}</span>
-				<span class="update-arrow">→</span>
-				<span class="update-to">v${escapeHtml(r.version)}</span>
-			</div>
-			<div class="update-title">${escapeHtml(r.name)}</div>
-			<div class="update-notes">${escapeHtml(notesPreview)}</div>
-			<div class="update-actions">
-				<button class="btn update-primary" id="upd-get">${r.installerUrl ? "Download installer" : "Get update"}</button>
-				<button class="btn btn-ghost" id="upd-gh">Release page</button>
-				<button class="btn btn-ghost update-skip" id="upd-skip">Skip this version</button>
-			</div>
-			<div class="update-sparkles">
-				${Array.from({ length: 12 }, (_, i) => `<span class="update-sparkle" style="--i:${i};--d:${(i * 137) % 360}deg"></span>`).join("")}
-			</div>
+async function startUpdateDownload() {
+	if (updateUi?.phase !== "available") return;
+	const release = updateUi.release;
+	if (!release.installerUrl || !release.installerName) {
+		setUpdateState({
+			phase: "error",
+			message: "This release doesn't have a Windows installer attached.",
+		});
+		return;
+	}
+	setUpdateState({ phase: "downloading", release, received: 0, total: 0 });
+	try {
+		const { path } = await bun().downloadUpdate({
+			url: release.installerUrl,
+			filename: release.installerName,
+		});
+		setUpdateState({ phase: "installing", release });
+		// Tiny pause so the user sees "Installing…" before the window closes.
+		setTimeout(() => {
+			void bun().runUpdateAndQuit({ path });
+		}, 600);
+	} catch (err) {
+		setUpdateState({ phase: "error", message: (err as Error).message });
+	}
+}
+
+function renderUpdateModal() {
+	let el = document.getElementById("update-modal");
+	if (!updateUi) {
+		if (el) closeUpdateModal();
+		return;
+	}
+	if (!el) {
+		el = document.createElement("div");
+		el.id = "update-modal";
+		el.className = "update-modal";
+		document.body.appendChild(el);
+		// Trigger the enter transition next frame.
+		requestAnimationFrame(() => el!.classList.add("update-modal-in"));
+	}
+	const body = (() => {
+		const u = updateUi!;
+		if (u.phase === "checking") {
+			return `
+				<div class="upd-spinner"></div>
+				<h2 class="upd-h">Checking for updates…</h2>
+				<p class="upd-p">Asking GitHub if there's a newer build.</p>
+			`;
+		}
+		if (u.phase === "up-to-date") {
+			return `
+				<div class="upd-check">✓</div>
+				<h2 class="upd-h">You're up to date</h2>
+				<p class="upd-p">Lakky v${escapeHtml(APP_VERSION)} is the latest release.</p>
+			`;
+		}
+		if (u.phase === "error") {
+			return `
+				<div class="upd-err">!</div>
+				<h2 class="upd-h">Update check failed</h2>
+				<p class="upd-p upd-mono">${escapeHtml(u.message)}</p>
+				<div class="upd-actions">
+					<button class="btn" id="upd-close-btn">Close</button>
+				</div>
+			`;
+		}
+		if (u.phase === "available") {
+			const notes = (u.release.notes || "No release notes provided.").trim();
+			const preview = notes.length > 520 ? notes.slice(0, 517) + "…" : notes;
+			return `
+				<div class="upd-pill"><span class="upd-pill-dot"></span>NEW VERSION</div>
+				<div class="upd-versions">
+					<span class="upd-from">v${escapeHtml(APP_VERSION)}</span>
+					<span class="upd-arrow">→</span>
+					<span class="upd-to">v${escapeHtml(u.release.version)}</span>
+				</div>
+				<h2 class="upd-h">${escapeHtml(u.release.name)}</h2>
+				<div class="upd-notes">${escapeHtml(preview)}</div>
+				<div class="upd-actions">
+					<button class="btn update-primary" id="upd-install">Install & Restart</button>
+					<button class="btn btn-ghost" id="upd-later">Later</button>
+					<button class="btn btn-ghost upd-skip-link" id="upd-skip">Skip this version</button>
+				</div>
+				<div class="update-sparkles">
+					${Array.from({ length: 14 }, (_, i) => `<span class="update-sparkle" style="--i:${i};--d:${(i * 137) % 360}deg"></span>`).join("")}
+				</div>
+			`;
+		}
+		if (u.phase === "downloading") {
+			return `
+				<div class="upd-pill"><span class="upd-pill-dot"></span>DOWNLOADING</div>
+				<h2 class="upd-h">Updating to v${escapeHtml(u.release.version)}</h2>
+				<div class="upd-bar"><div class="upd-bar-fill" id="upd-bar-fill"></div></div>
+				<p class="upd-p upd-mono" id="upd-bar-text">0.0 MB</p>
+				<p class="upd-p">Lakky will restart automatically when the download finishes.</p>
+			`;
+		}
+		// installing
+		return `
+			<div class="upd-spinner"></div>
+			<h2 class="upd-h">Installing v${escapeHtml(u.release.version)}…</h2>
+			<p class="upd-p">Lakky is about to restart. Don't close this window.</p>
+		`;
+	})();
+
+	el.innerHTML = `
+		<div class="update-modal-backdrop"></div>
+		<div class="update-modal-card">
+			<div class="update-modal-glow"></div>
+			${body}
 		</div>
 	`;
-	const root = document.createElement("aside");
-	root.id = "update-card";
-	root.className = "update-card";
-	root.innerHTML = html;
-	document.body.appendChild(root);
-	// Slide-in next frame so the transition fires.
-	requestAnimationFrame(() => root.classList.add("update-card-in"));
 
-	root.querySelector("#upd-close")?.addEventListener("click", () => {
+	// Wire phase-specific buttons.
+	el.querySelector("#upd-install")?.addEventListener("click", () => {
 		sfx.click();
-		dismissUpdateCard(false);
+		void startUpdateDownload();
 	});
-	root.querySelector("#upd-skip")?.addEventListener("click", () => {
+	el.querySelector("#upd-later")?.addEventListener("click", () => {
 		sfx.click();
-		dismissUpdateCard(true);
-		toast(`Won't ask again for ${r.version}.`, { ttl: 2400 });
+		closeUpdateModal();
 	});
-	root.querySelector("#upd-gh")?.addEventListener("click", async () => {
+	el.querySelector("#upd-skip")?.addEventListener("click", () => {
+		if (updateUi?.phase !== "available") return;
+		const tag = updateUi.release.tag;
 		sfx.click();
-		try { await bun().openExternal({ url: r.htmlUrl }); } catch {}
+		state.settings.skippedUpdateTag = tag;
+		void saveSettings();
+		toast(`Won't ask again for ${updateUi.release.version}.`, { ttl: 2400 });
+		closeUpdateModal();
 	});
-	root.querySelector("#upd-get")?.addEventListener("click", async () => {
+	el.querySelector("#upd-close-btn")?.addEventListener("click", () => {
 		sfx.click();
-		// Notify-only mode: open the .exe asset URL (or the release page if
-		// there's no installer asset) in the browser. A future iteration can
-		// download to %TEMP% and spawn the installer directly.
-		const url = r.installerUrl ?? r.htmlUrl;
-		try { await bun().openExternal({ url }); } catch {}
-		dismissUpdateCard(false);
+		closeUpdateModal();
 	});
 }
 

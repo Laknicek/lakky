@@ -19,7 +19,7 @@ import { onDiscordStatus, setDiscordPresence } from "./discord";
 import { readM3U, writeM3U } from "./m3u";
 import { startWebRemote, stopWebRemote } from "./webRemote";
 import { appDataDir, LAKKY_APP_DATA } from "./paths";
-import { fetchLatestRelease } from "./updater";
+import { fetchLatestRelease, downloadInstaller, spawnInstallerAndQuit } from "./updater";
 
 const DEV_SERVER_PORT = 5173;
 const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
@@ -259,6 +259,27 @@ function makePlayerRPC() {
 			checkLatestRelease: async ({ repo }) => {
 				const release = await fetchLatestRelease(repo);
 				return { release };
+			},
+
+			downloadUpdate: async ({ url, filename }) => {
+				const path = await downloadInstaller(url, filename, (received, total) => {
+					mainWindow.webview.rpc?.send.updateDownloadProgress({ received, total });
+				});
+				return { path };
+			},
+
+			runUpdateAndQuit: ({ path }) => {
+				// Fire-and-forget: spawnInstallerAndQuit schedules process.exit
+				// after the installer is detached. The RPC reply is barely
+				// useful — by the time it would arrive we're gone — but we
+				// return one so the renderer's await resolves cleanly first.
+				try {
+					spawnInstallerAndQuit(path);
+					return { ok: true };
+				} catch (err) {
+					console.error("[updater] failed to spawn installer:", err);
+					return { ok: false };
+				}
 			},
 
 			setDiscordPresence: async ({ presence }) => {

@@ -192,6 +192,21 @@ export type PlayerRPC = {
 				params: { repo: string };
 				response: { release: LatestReleaseInfo | null };
 			};
+			// Download an installer .exe to a temp file. Progress streams back
+			// via the updateDownloadProgress message. Resolves with the local
+			// path once complete.
+			downloadUpdate: {
+				params: { url: string; filename: string };
+				response: { path: string };
+			};
+			// Spawn the downloaded installer detached with the silent-install
+			// flags and quit the bun process so the installer can replace the
+			// running executable. The installer's [Run] entry brings the new
+			// build back up automatically.
+			runUpdateAndQuit: {
+				params: { path: string };
+				response: { ok: boolean };
+			};
 		};
 		messages: {};
 	}>;
@@ -206,6 +221,10 @@ export type PlayerRPC = {
 			externalCommand: { action: ExternalCommand; value?: number | string };
 			// Mini-player asks the main window to push its latest state.
 			requestStatePush: {};
+			// Streaming progress of the installer download. -1 in `total`
+			// means the server didn't send Content-Length so we can't compute
+			// a percentage.
+			updateDownloadProgress: { received: number; total: number };
 		};
 	}>;
 };
