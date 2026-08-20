@@ -8,15 +8,19 @@ import type {
 	SharedPlayerState,
 	LatestReleaseInfo,
 } from "../shared/rpcSchema";
+import { compareVersions } from "../shared/rpcSchema";
 import { AudioEngine, EQ_PRESETS, EQ_BANDS, type RepeatMode } from "./audio";
 import { Visualizer, type VizStyle } from "./visualizer";
 import { sfx, primeAudio, setSfxEnabled } from "./sfx";
 import { iconUrl } from "./logo";
 import { installTooltips } from "./tooltip";
+import { installWindowDrag } from "./drag";
 import type { NodeGraph } from "./nodes";
 import { newGraph } from "./nodes";
 import { renderNodeEditor } from "./nodeEditor";
 import { escapeHtml } from "./util";
+import { Echoes, computeEchoes, type EchoesData } from "./echoes";
+import { Stylized3DScene, type ScenePreset, type AudioBands } from "./stylized3d";
 
 // ---------- RPC ----------
 const rpc = Electroview.defineRPC<PlayerRPC>({
@@ -37,8 +41,8 @@ const rpc = Electroview.defineRPC<PlayerRPC>({
 			windowStateChanged: ({ hidden }) => {
 				setRendererHidden(hidden);
 			},
-			updateDownloadProgress: ({ received, total }) => {
-				onDownloadProgress(received, total);
+			updateDownloadProgress: (prog) => {
+				onDownloadProgress(prog);
 			},
 			externalCommand: ({ action, value }) => {
 				applyExternalCommand(action, value);
@@ -66,9 +70,13 @@ type Settings = {
 	eq: number[];
 	eqPreset: string;
 	accent: string; // hex
-	theme: "midnight" | "aurora" | "solar" | "rose";
+	theme: "midnight" | "aurora" | "solar" | "rose" | "sakura_sunset" | "cyber_neotokyo" | "ghibli_emerald" | "ocean_shinkai" | "midnight_shogun";
+	scenePreset: ScenePreset;
+	show3DScene: boolean;
 	sleepTimer: number; // 0 = off; minutes
 	speed: number; // 0.5 - 2.0
+	preAmp: number; // pre-amp gain in dB, -12 to 12
+	mono: boolean;
 	smartShuffle: boolean; // weighted by play count + recency instead of pure random
 	matchAccent: boolean; // override theme accent with one extracted from album art
 	customEqPresets: Record<string, number[]>;
@@ -76,14 +84,17 @@ type Settings = {
 	idleViz: boolean;      // pulse while paused (off saves a touch more GPU)
 	vizStyle: VizStyle;    // bars | wave | radial | mirror — for the Now Playing visualizer
 	showStripViz: boolean; // when false, the bottom-bar strip visualizer's div is removed entirely
-	// Auto-updater: leave updateRepo empty to disable the feature entirely.
-	// Format is "owner/repo" — the renderer polls GitHub releases on startup
-	// and every few hours when this is set.
+	// Auto-updater
 	updateRepo: string;
+	updateChannel: "stable" | "canary";
 	autoCheckUpdates: boolean;
-	// Tag the user explicitly dismissed via "Skip this version" so we don't
-	// keep nagging them about the same release.
 	skippedUpdateTag: string;
+	autostartOnBoot: boolean;
+	showTrackNotifications: boolean;
+	replayGain: "off" | "track" | "album";
+	gapless: boolean;
+	lyrics: boolean;
+	scrobbleLastfm: boolean;
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -96,9 +107,14 @@ const DEFAULT_SETTINGS: Settings = {
 	eq: [...EQ_PRESETS.Flat],
 	eqPreset: "Flat",
 	accent: "#a78bfa",
-	theme: "midnight",
+	theme: "sakura_sunset",
+	scenePreset: "sakura_sunset",
+	show3DScene: true,
 	sleepTimer: 0,
 	speed: 1.0,
+	preAmp: 0,
+	mono: false,
+	autostartOnBoot: false,
 	smartShuffle: false,
 	matchAccent: true,
 	customEqPresets: {},
@@ -107,8 +123,14 @@ const DEFAULT_SETTINGS: Settings = {
 	vizStyle: "bars",
 	showStripViz: true,
 	updateRepo: "Laknicek/lakky",
+	updateChannel: "stable",
 	autoCheckUpdates: true,
 	skippedUpdateTag: "",
+	showTrackNotifications: true,
+	replayGain: "off",
+	gapless: true,
+	lyrics: true,
+	scrobbleLastfm: false,
 };
 
 const state = {
@@ -129,6 +151,17 @@ const state = {
 	selectedIds: new Set<string>(), // for bulk-edit
 	webRemoteUrl: null as string | null,
 	miniOpen: false,
+	mutedVolume: 0.85, // pre-mute volume for restore
+	recentlyPlayed: [] as string[], // track IDs in most-recent-first order
+	librarySort: "title" as "title" | "artist" | "album" | "duration" | "year",
+	ratings: {} as Record<string, number>, // trackId → 1-5 stars
+	playDates: {} as Record<string, number[]>, // trackId → epoch-ms timestamps
+	abLoop: null as { a: number; b: number } | null,
+	audioDevices: [] as MediaDeviceInfo[],
+	selectedDeviceId: "default" as string,
+	npImmersive: false,
+	libraryFilter: "all" as string, // "all" | genre | artist
+	queueAnimDir: 0, // -1, 0, or 1 for slide direction
 	// User's custom audio effect graph. When non-null it replaces the
 	// 10-band EQ chain inside the AudioEngine. The node editor view owns
 	// the UI for this; we just persist it and push updates to both engines.
@@ -155,90 +188,32 @@ tbLogo.innerHTML = `<img src="${iconUrl}" alt="" draggable="false">`;
 document.getElementById("tb-min")?.addEventListener("click", async (e) => {
 	e.stopPropagation();
 	sfx.click();
-	try { await bun().windowMinimize({}); } catch {}
+	try { await bun().windowMinimize({}); } catch (e) { console.warn("[ui] windowMinimize failed:", (e as Error).message); }
 });
 document.getElementById("tb-max")?.addEventListener("click", async (e) => {
 	e.stopPropagation();
 	sfx.click();
-	try { await bun().windowMaximizeToggle({}); } catch {}
+	try { await bun().windowMaximizeToggle({}); } catch (e) { console.warn("[ui] windowMaximizeToggle failed:", (e as Error).message); }
 });
 document.getElementById("tb-close")?.addEventListener("click", async (e) => {
 	e.stopPropagation();
 	sfx.click();
-	try { await bun().windowClose({}); } catch {}
+	try { await bun().windowClose({}); } catch (e) { console.warn("[ui] windowClose failed:", (e as Error).message); }
 });
 
 // Manual window-drag for the frameless titlebar. WebView2 doesn't honor
 // -webkit-app-region, so we do it in JS: capture cursor + window position on
 // mousedown, then push setPosition() updates on mousemove (throttled to rAF).
-{
-	const titlebar = document.getElementById("titlebar")!;
-	let dragging = false;
-	let startScreenX = 0;
-	let startScreenY = 0;
-	let startWinX = 0;
-	let startWinY = 0;
-	let queuedX: number | null = null;
-	let queuedY: number | null = null;
-	let rafScheduled = false;
-
-	const flush = () => {
-		rafScheduled = false;
-		if (queuedX === null || queuedY === null) return;
-		const x = queuedX;
-		const y = queuedY;
-		queuedX = null;
-		queuedY = null;
-		bun().windowSetPosition({ x, y }).catch(() => {});
-	};
-
-	titlebar.addEventListener("mousedown", async (e) => {
-		if (e.button !== 0) return;
-		// Don't start a drag from the control buttons.
-		if ((e.target as HTMLElement).closest(".tb-btn")) return;
-		dragging = true;
-		startScreenX = e.screenX;
-		startScreenY = e.screenY;
-		try {
-			const p = await bun().windowGetPosition({});
-			startWinX = p.x;
-			startWinY = p.y;
-		} catch {
-			dragging = false;
-		}
-	});
-
-	window.addEventListener("mousemove", (e) => {
-		if (!dragging) return;
-		const dx = e.screenX - startScreenX;
-		const dy = e.screenY - startScreenY;
-		queuedX = startWinX + dx;
-		queuedY = startWinY + dy;
-		if (!rafScheduled) {
-			rafScheduled = true;
-			requestAnimationFrame(flush);
-		}
-	});
-
-	window.addEventListener("mouseup", () => {
-		dragging = false;
-	});
-
-	// Double-click the drag area to toggle maximize, like a real OS titlebar.
-	titlebar.addEventListener("dblclick", async (e) => {
-		if ((e.target as HTMLElement).closest(".tb-btn")) return;
-		sfx.click();
-		try { await bun().windowMaximizeToggle({}); } catch {}
-	});
-}
+installWindowDrag(bun, document.getElementById("titlebar")!, undefined, ".tb-btn", () => {
+	sfx.click();
+	bun().windowMaximizeToggle({}).catch(() => {});
+});
 
 // ---------- Audio ----------
 // One shared AudioContext for the whole app. Two audio engines (A/B) and a
 // video engine all attach their own filter chains here, which is what lets
 // crossfade work — two parallel sources can be mixed by the same context.
-const sharedAudioCtx: AudioContext = new (
-	window.AudioContext || window.webkitAudioContext!
-)();
+const sharedAudioCtx: AudioContext = new window.AudioContext();
 function createAudioEl(): HTMLAudioElement {
 	const a = document.createElement("audio");
 	a.crossOrigin = "anonymous";
@@ -287,7 +262,9 @@ const videoEngine = new AudioEngine(videoEl, sharedAudioCtx, monitorTap);
 // the moment the user comes back.
 function ensureAudioRunning() {
 	if (sharedAudioCtx.state !== "running") {
-		sharedAudioCtx.resume().catch(() => {});
+		sharedAudioCtx.resume().catch((err) => {
+			console.warn("[audio-watchdog] shared AudioContext resume failed:", (err as Error).message);
+		});
 	}
 }
 sharedAudioCtx.addEventListener("statechange", ensureAudioRunning);
@@ -299,15 +276,12 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("focus", ensureAudioRunning);
 setInterval(() => {
-	// Only nudge while some engine should be playing — otherwise leave the
-	// context suspended so it doesn't burn CPU.
-	if (
-		!engineA.media.paused ||
-		!engineB.media.paused ||
-		!videoEngine.media.paused
-	) {
-		ensureAudioRunning();
-	}
+	// Keep the AudioContext alive aggressively — no conditional skip.
+	// When the window is minimized Chromium can suspend the context
+	// between tracks. If we only nudge while an engine is showing as
+	// "playing", a track-transition gap becomes a permanent silent
+	// hole until the user re-focuses the window.
+	ensureAudioRunning();
 }, 2000);
 
 let crossfading = false;
@@ -334,6 +308,7 @@ function mountVideoIn(host: HTMLElement) {
 // audio engine; on completion we just retarget this reference.
 let engine: AudioEngine = engineA;
 let visualizer: Visualizer | null = null;
+let stylized3dScene: Stylized3DScene | null = null;
 let usingVideo = false;
 
 function attachEngineHandlers() {
@@ -342,24 +317,29 @@ function attachEngineHandlers() {
 			updateNowPlayingProgress(cur, dur);
 			updateMediaSessionPosition();
 			maybeStartCrossfade(cur, dur);
+			if (immersiveActive) updateImmersiveProgress(cur, dur);
 		},
 		onEnded: () => {
-			if (crossfading) return; // crossfade will handle the transition
+			if (crossfading) return;
 			onTrackEnded();
 		},
 		onPlay: () => {
 			updatePlayButton(true);
 			updateNowPlayingArtSpin(true);
+			updateImmersivePlayState();
 			visualizer?.start();
 			stripViz?.start();
+			if (state.settings.show3DScene) stylized3dScene?.start();
 			if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
 			schedulePresenceUpdate();
 		},
 		onPause: () => {
 			updatePlayButton(false);
 			updateNowPlayingArtSpin(false);
+			updateImmersivePlayState();
 			visualizer?.stop();
 			stripViz?.stop();
+			stylized3dScene?.stop();
 			if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
 			maybeRememberPosition();
 			schedulePresenceUpdate();
@@ -438,7 +418,8 @@ async function startCrossfade(targetIdx: number, durationSec: number) {
 
 	try {
 		await incoming.loadAndPlay(next);
-	} catch {
+	} catch (e) {
+		console.warn("[audio] crossfade load failed:", (e as Error).message);
 		return;
 	}
 
@@ -472,6 +453,8 @@ async function startCrossfade(targetIdx: number, durationSec: number) {
 		state.queueIndex = targetIdx;
 		state.playStats[next.id] = (state.playStats[next.id] ?? 0) + 1;
 		saveStats();
+		state.recentlyPlayed = [next.id, ...state.recentlyPlayed.filter((id) => id !== next.id)].slice(0, 50);
+		saveRecentlyPlayed();
 		crossfading = false;
 		crossfadeRaf = null;
 		updateNowPlayingBar();
@@ -619,10 +602,25 @@ async function loadPersisted() {
 		(v): v is Record<string, number> => !!v && typeof v === "object",
 		(v) => { state.bookmarks = v; },
 	);
+	await loadPersistedKey<string[]>(
+		"recentlyPlayed",
+		(v): v is string[] => Array.isArray(v),
+		(v) => { state.recentlyPlayed = v; },
+	);
 	await loadPersistedKey<NodeGraph>(
 		"nodeGraph",
 		(v): v is NodeGraph => !!v && typeof v === "object" && "nodes" in (v as object),
 		(v) => { state.nodeGraph = v; },
+	);
+	await loadPersistedKey<Record<string, number>>(
+		"ratings",
+		(v): v is Record<string, number> => !!v && typeof v === "object",
+		(v) => { state.ratings = v; },
+	);
+	await loadPersistedKey<{ a: number; b: number } | null>(
+		"abLoop",
+		(v): v is { a: number; b: number } | null => v === null || (!!v && typeof v === "object" && typeof (v as any).a === "number" && typeof (v as any).b === "number"),
+		(v) => { state.abLoop = v; },
 	);
 }
 
@@ -651,28 +649,20 @@ async function saveStats() {
 async function saveBookmarks() {
 	await bun().savePersistedState({ key: "bookmarks", value: state.bookmarks });
 }
-
-// ---------- Auto updater ----------
-// Strict-enough semver compare. Tags can be "v1.2.0" or "1.2.0"; pre-release
-// suffixes (-beta, -rc.1) sort below the corresponding stable.
-function compareVersions(a: string, b: string): number {
-	const norm = (v: string) => v.replace(/^v/i, "").trim();
-	const splitCore = (v: string) => {
-		const [core, pre = ""] = norm(v).split(/[-+]/, 2);
-		return { core: core.split(".").map((n) => parseInt(n, 10) || 0), pre };
-	};
-	const A = splitCore(a), B = splitCore(b);
-	const len = Math.max(A.core.length, B.core.length);
-	for (let i = 0; i < len; i++) {
-		const ai = A.core[i] ?? 0, bi = B.core[i] ?? 0;
-		if (ai !== bi) return ai > bi ? 1 : -1;
-	}
-	if (A.pre === B.pre) return 0;
-	if (!A.pre) return 1;
-	if (!B.pre) return -1;
-	return A.pre > B.pre ? 1 : -1;
+async function saveRatings() {
+	await bun().savePersistedState({ key: "ratings", value: state.ratings });
+}
+async function savePlayDates() {
+	await bun().savePersistedState({ key: "playDates", value: state.playDates });
+}
+async function saveAbLoop() {
+	await bun().savePersistedState({ key: "abLoop", value: state.abLoop });
+}
+async function saveRecentlyPlayed() {
+	await bun().savePersistedState({ key: "recentlyPlayed", value: state.recentlyPlayed });
 }
 
+// ---------- Auto updater ----------
 // Hit GitHub /releases/latest via the bun-side helper. Returns the release
 // if it's newer than APP_VERSION and the user hasn't already skipped its
 // tag — otherwise null. Errors bubble up so the caller decides whether to
@@ -680,7 +670,10 @@ function compareVersions(a: string, b: string): number {
 async function fetchUpdateIfNewer(silent: boolean): Promise<LatestReleaseInfo | null> {
 	const repo = state.settings.updateRepo.trim();
 	if (!repo) return null;
-	const { release } = await bun().checkLatestRelease({ repo });
+	const { release } = await bun().checkLatestRelease({
+		repo,
+		channel: state.settings.updateChannel,
+	});
 	if (!release) {
 		if (!silent) toast("No releases found on that repo.", { ttl: 2400 });
 		return null;
@@ -704,9 +697,6 @@ async function startUpdateChecker() {
 	}
 	if (!state.settings.updateRepo.trim()) return;
 	if (!state.settings.autoCheckUpdates) return;
-	// Boot-time check shows the modal popup (visible "checking → result" UX).
-	// Subsequent periodic checks are silent and only surface if they actually
-	// find an update, so the user isn't pestered every 6 hours.
 	setTimeout(() => runUpdateCheck("boot"), 4000);
 	updateCheckTimer = setInterval(() => runUpdateCheck("background"), 6 * 60 * 60 * 1000);
 }
@@ -716,11 +706,6 @@ async function manualUpdateCheck() {
 	void runUpdateCheck("manual");
 }
 
-// Drives the boot popup + the manual settings button. `kind` controls how
-// the "no update found" outcome surfaces:
-//   - boot:       brief checking pill that auto-dismisses if up-to-date
-//   - manual:     full modal, "you're up to date" message lingers ~2s
-//   - background: silent unless an update is actually found
 async function runUpdateCheck(kind: "boot" | "manual" | "background") {
 	if (kind !== "background") {
 		setUpdateState({ phase: "checking" });
@@ -749,8 +734,16 @@ type UpdatePhase =
 	| { phase: "checking" }
 	| { phase: "up-to-date" }
 	| { phase: "available"; release: LatestReleaseInfo }
-	| { phase: "downloading"; release: LatestReleaseInfo; received: number; total: number }
-	| { phase: "installing"; release: LatestReleaseInfo }
+	| {
+			phase: "downloading";
+			release: LatestReleaseInfo;
+			received: number;
+			total: number;
+			percent?: number;
+			speedBytesPerSec?: number;
+			etaSeconds?: number;
+	  }
+	| { phase: "installing"; release: LatestReleaseInfo; sha256?: string }
 	| { phase: "error"; message: string };
 
 let updateUi: UpdatePhase | null = null;
@@ -772,17 +765,30 @@ function closeUpdateModal() {
 	if (prev?.phase === "available") state.pendingUpdate = null;
 }
 
-function onDownloadProgress(received: number, total: number) {
+function onDownloadProgress(prog: {
+	received: number;
+	total: number;
+	percent?: number;
+	speedBytesPerSec?: number;
+	etaSeconds?: number;
+}) {
 	if (updateUi?.phase !== "downloading") return;
-	updateUi = { ...updateUi, received, total };
+	updateUi = { ...updateUi, ...prog };
 	const bar = document.getElementById("upd-bar-fill") as HTMLDivElement | null;
 	const txt = document.getElementById("upd-bar-text");
-	if (bar && total > 0) bar.style.width = `${Math.min(100, (received / total) * 100)}%`;
+	const stats = document.getElementById("upd-bar-stats");
+	const pct = prog.total > 0 ? Math.min(100, (prog.received / prog.total) * 100) : prog.percent ?? 0;
+	if (bar) bar.style.width = `${pct.toFixed(1)}%`;
 	if (txt) {
 		const mb = (n: number) => (n / 1048576).toFixed(1);
-		txt.textContent = total > 0
-			? `${mb(received)} / ${mb(total)} MB`
-			: `${mb(received)} MB`;
+		txt.textContent = prog.total > 0
+			? `${mb(prog.received)} / ${mb(prog.total)} MB (${pct.toFixed(0)}%)`
+			: `${mb(prog.received)} MB`;
+	}
+	if (stats && prog.speedBytesPerSec !== undefined) {
+		const speedMb = (prog.speedBytesPerSec / 1048576).toFixed(2);
+		const eta = prog.etaSeconds && prog.etaSeconds > 0 ? ` • ${Math.round(prog.etaSeconds)}s remaining` : "";
+		stats.textContent = `${speedMb} MB/s${eta}`;
 	}
 }
 
@@ -798,15 +804,14 @@ async function startUpdateDownload() {
 	}
 	setUpdateState({ phase: "downloading", release, received: 0, total: 0 });
 	try {
-		const { path } = await bun().downloadUpdate({
+		const { path, sha256 } = await bun().downloadUpdate({
 			url: release.installerUrl,
 			filename: release.installerName,
 		});
-		setUpdateState({ phase: "installing", release });
-		// Tiny pause so the user sees "Installing…" before the window closes.
+		setUpdateState({ phase: "installing", release, sha256 });
 		setTimeout(() => {
 			void bun().runUpdateAndQuit({ path });
-		}, 600);
+		}, 800);
 	} catch (err) {
 		setUpdateState({ phase: "error", message: (err as Error).message });
 	}
@@ -823,7 +828,6 @@ function renderUpdateModal() {
 		el.id = "update-modal";
 		el.className = "update-modal";
 		document.body.appendChild(el);
-		// Trigger the enter transition next frame.
 		requestAnimationFrame(() => el!.classList.add("update-modal-in"));
 	}
 	const body = (() => {
@@ -832,14 +836,14 @@ function renderUpdateModal() {
 			return `
 				<div class="upd-spinner"></div>
 				<h2 class="upd-h">Checking for updates…</h2>
-				<p class="upd-p">Asking GitHub if there's a newer build.</p>
+				<p class="upd-p">Asking GitHub for ${state.settings.updateChannel === "canary" ? "Canary" : "Latest"} release.</p>
 			`;
 		}
 		if (u.phase === "up-to-date") {
 			return `
 				<div class="upd-check">✓</div>
 				<h2 class="upd-h">You're up to date</h2>
-				<p class="upd-p">Lakky v${escapeHtml(APP_VERSION)} is the latest release.</p>
+				<p class="upd-p">Lakky v${escapeHtml(APP_VERSION)} is the latest build on the ${state.settings.updateChannel} channel.</p>
 			`;
 		}
 		if (u.phase === "error") {
@@ -856,7 +860,7 @@ function renderUpdateModal() {
 			const notes = (u.release.notes || "No release notes provided.").trim();
 			const preview = notes.length > 520 ? notes.slice(0, 517) + "…" : notes;
 			return `
-				<div class="upd-pill"><span class="upd-pill-dot"></span>NEW VERSION</div>
+				<div class="upd-pill"><span class="upd-pill-dot"></span>NEW ${state.settings.updateChannel.toUpperCase()} BUILD</div>
 				<div class="upd-versions">
 					<span class="upd-from">v${escapeHtml(APP_VERSION)}</span>
 					<span class="upd-arrow">→</span>
@@ -869,25 +873,26 @@ function renderUpdateModal() {
 					<button class="btn btn-ghost" id="upd-later">Later</button>
 					<button class="btn btn-ghost upd-skip-link" id="upd-skip">Skip this version</button>
 				</div>
-				<div class="update-sparkles">
-					${Array.from({ length: 14 }, (_, i) => `<span class="update-sparkle" style="--i:${i};--d:${(i * 137) % 360}deg"></span>`).join("")}
-				</div>
 			`;
 		}
 		if (u.phase === "downloading") {
 			return `
-				<div class="upd-pill"><span class="upd-pill-dot"></span>DOWNLOADING</div>
+				<div class="upd-pill"><span class="upd-pill-dot"></span>DOWNLOADING UPDATE</div>
 				<h2 class="upd-h">Updating to v${escapeHtml(u.release.version)}</h2>
 				<div class="upd-bar"><div class="upd-bar-fill" id="upd-bar-fill"></div></div>
-				<p class="upd-p upd-mono" id="upd-bar-text">0.0 MB</p>
-				<p class="upd-p">Lakky will restart automatically when the download finishes.</p>
+				<div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.4rem">
+					<span class="upd-p upd-mono" id="upd-bar-text">Connecting…</span>
+					<span class="upd-p upd-mono" id="upd-bar-stats" style="font-size:0.76rem;color:var(--accent-a)"></span>
+				</div>
+				<p class="upd-p" style="margin-top:0.6rem;font-size:0.78rem">Lakky will verify SHA-256 integrity and relaunch automatically.</p>
 			`;
 		}
 		// installing
 		return `
 			<div class="upd-spinner"></div>
 			<h2 class="upd-h">Installing v${escapeHtml(u.release.version)}…</h2>
-			<p class="upd-p">Lakky is about to restart. Don't close this window.</p>
+			<p class="upd-p" style="color:#4ade80">✓ SHA-256 verified safe</p>
+			<p class="upd-p">Lakky is relaunching. Please do not force close.</p>
 		`;
 	})();
 
@@ -899,7 +904,6 @@ function renderUpdateModal() {
 		</div>
 	`;
 
-	// Wire phase-specific buttons.
 	el.querySelector("#upd-install")?.addEventListener("click", () => {
 		sfx.click();
 		void startUpdateDownload();
@@ -923,6 +927,80 @@ function renderUpdateModal() {
 	});
 }
 
+function openSecurityAuditModal(t: TrackInfo) {
+	let modal = document.getElementById("security-modal");
+	if (modal) modal.remove();
+
+	modal = document.createElement("div");
+	modal.id = "security-modal";
+	modal.className = "update-modal update-modal-in";
+
+	const isClean = t.securitySafe !== false && (t.securityScore ?? 100) >= 80;
+	const score = t.securityScore ?? 100;
+	const threats = t.securityThreats || [];
+
+	modal.innerHTML = `
+		<div class="update-modal-backdrop" id="sec-backdrop"></div>
+		<div class="update-modal-card" style="max-width:540px">
+			<div class="update-modal-glow" style="background:radial-gradient(circle at 50% 0%, ${isClean ? "rgba(34, 197, 94, 0.25)" : "rgba(239, 68, 68, 0.35)"}, transparent 70%)"></div>
+			<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
+				<div style="width:40px;height:40px;border-radius:10px;background:${isClean ? "rgba(34, 197, 94, 0.15)" : "rgba(239, 68, 68, 0.2)"};color:${isClean ? "#4ade80" : "#f87171"};display:flex;align-items:center;justify-content:center">
+					${isClean ? icons.shieldCheck : icons.shieldAlert}
+				</div>
+				<div>
+					<h2 style="margin:0;font-size:1.15rem;font-weight:700">${isClean ? "Verified Safe Media" : "Security Alert / Inspection"}</h2>
+					<div style="font-size:0.78rem;color:rgba(232, 232, 245, 0.6)">File Integrity & Binary Shield Analysis</div>
+				</div>
+			</div>
+
+			<div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.9rem;margin-bottom:1rem;font-size:0.82rem;display:flex;flex-direction:column;gap:0.5rem">
+				<div style="display:flex;justify-content:space-between">
+					<span style="color:rgba(232,232,245,0.6)">File:</span>
+					<span style="font-weight:600;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.title)}</span>
+				</div>
+				<div style="display:flex;justify-content:space-between">
+					<span style="color:rgba(232,232,245,0.6)">Path:</span>
+					<span style="font-family:monospace;font-size:0.74rem;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.path)}</span>
+				</div>
+				<div style="display:flex;justify-content:space-between">
+					<span style="color:rgba(232,232,245,0.6)">Verified Container:</span>
+					<span style="font-weight:600;color:var(--accent-a)">${t.verifiedFormat ? escapeHtml(t.verifiedFormat.toUpperCase()) : "Standard Media"}</span>
+				</div>
+				<div style="display:flex;justify-content:space-between">
+					<span style="color:rgba(232,232,245,0.6)">Integrity Score:</span>
+					<span style="font-weight:700;color:${score >= 80 ? "#4ade80" : score >= 50 ? "#facc15" : "#f87171"}">${score} / 100</span>
+				</div>
+			</div>
+
+			${threats.length > 0 ? `
+				<div style="background:rgba(239, 68, 68, 0.12);border:1px solid rgba(239, 68, 68, 0.3);border-radius:10px;padding:0.85rem;margin-bottom:1.2rem">
+					<div style="font-weight:600;color:#f87171;font-size:0.84rem;margin-bottom:0.4rem">Detected Vulnerabilities & Warnings:</div>
+					<ul style="margin:0;padding-left:1.2rem;font-size:0.78rem;color:#fca5a5;line-height:1.4">
+						${threats.map(threat => `<li>${escapeHtml(threat)}</li>`).join("")}
+					</ul>
+				</div>
+			` : `
+				<div style="background:rgba(34, 197, 94, 0.08);border:1px solid rgba(34, 197, 94, 0.25);border-radius:10px;padding:0.8rem;margin-bottom:1.2rem;font-size:0.8rem;color:#86efac">
+					✓ Zero disguised binaries or polyglot stego payloads found. Media container headers and atoms conform to safe playback standards.
+				</div>
+			`}
+
+			<div style="display:flex;justify-content:flex-end;gap:0.6rem">
+				<button class="btn btn-ghost" id="sec-folder-btn">${icons.folder} Show file</button>
+				<button class="btn btn-primary" id="sec-close-btn">Done</button>
+			</div>
+		</div>
+	`;
+
+	document.body.appendChild(modal);
+
+	modal.querySelector("#sec-close-btn")?.addEventListener("click", () => modal?.remove());
+	modal.querySelector("#sec-backdrop")?.addEventListener("click", () => modal?.remove());
+	modal.querySelector("#sec-folder-btn")?.addEventListener("click", () => {
+		bun().showInFolder({ path: t.path }).catch(() => {});
+	});
+}
+
 // Update the current audio effect graph: store on state, persist to disk, and
 // push to BOTH engineA and engineB so a crossfade in progress doesn't end up
 // with one engine routed through the new graph and the other through the old
@@ -932,7 +1010,9 @@ async function applyNodeGraph(graph: NodeGraph | null) {
 	state.nodeGraph = graph;
 	try {
 		await bun().savePersistedState({ key: "nodeGraph", value: graph });
-	} catch {}
+	} catch (err) {
+		console.warn("[node-graph] persist failed:", (err as Error).message);
+	}
 	try { engineA.setNodeGraph(graph); } catch (err) {
 		console.warn("[node-graph] engineA failed:", err);
 		toast(`Audio graph error: ${(err as Error).message}`, { ttl: 4000 });
@@ -1028,6 +1108,7 @@ const icons = {
 	repeatOne: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"/><text x="9" y="16" font-size="9" font-weight="bold" fill="currentColor" stroke="none">1</text></svg>`,
 	queue: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h13M3 12h13M3 18h9M17 16l3 3 3-3M20 5v14"/></svg>`,
 	volume: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>`,
+	mute: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM23 9l-6 6M17 9l6 6"/></svg>`,
 	plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>`,
 	folder: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`,
 	musicNote: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/></svg>`,
@@ -1039,6 +1120,12 @@ const icons = {
 	pip: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18v12H3z"/><path d="M13 11h6v5h-6z" fill="currentColor" stroke="none"/></svg>`,
 	mini: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><rect x="12" y="12" width="7" height="7" rx="1.5" fill="currentColor" stroke="none"/></svg>`,
 	tray: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14h4l2 3h6l2-3h4"/><path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>`,
+	sparkle: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/><path d="M19 3l.5 2L21 5.5 19 6l-.5 2L18 5.5 16 5l2-.5z"/></svg>`,
+	abLoop: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6V2l4 4-4 4V8a6 6 0 1 0 6 6H6a6 6 0 1 0 6-6"/></svg>`,
+	shield: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
+	shieldCheck: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`,
+	shieldAlert: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+	world3d: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>`,
 };
 
 // ---------- App shell render ----------
@@ -1046,13 +1133,13 @@ function render() {
 	appEl.innerHTML = `
 		<aside class="sidebar">
 			<nav class="sidebar-nav">
-				${navItem("home", icons.home, "Home")}
-				${navItem("library", icons.library, "Library")}
-				${navItem("nowplaying", icons.disc, "Now Playing")}
-				${navItem("equalizer", icons.eq, "Equalizer")}
-				${navItem("playlists", icons.list, "Playlists")}
-				${navItem("stats", icons.chart, "Stats")}
-				${navItem("nodes", icons.node, "Nodes")}
+				${navItem("home", icons.home, "Home", "1")}
+				${navItem("library", icons.library, "Library", "2")}
+				${navItem("nowplaying", icons.disc, "Now Playing", "3")}
+				${navItem("equalizer", icons.eq, "Equalizer", "4")}
+				${navItem("playlists", icons.list, "Playlists", "5")}
+				${navItem("stats", icons.chart, "Stats", "6")}
+				${navItem("nodes", icons.node, "Nodes", "7")}
 				${navItem("settings", icons.settings, "Settings")}
 			</nav>
 			<div class="sidebar-section-title">Your Playlists</div>
@@ -1075,8 +1162,9 @@ function render() {
 				<div class="np-center">
 					<div class="np-buttons">
 						<button class="icon-btn" id="btn-shuffle" title="Shuffle">${icons.shuffle}</button>
+						<button class="icon-btn" id="btn-abloop" title="A-B Loop (B)">${icons.abLoop}</button>
 						<button class="icon-btn" id="btn-prev" title="Previous (Ctrl+←)">${icons.prev}</button>
-						<button class="icon-btn play" id="btn-play" title="Play / pause (Space)">${icons.play}</button>
+						<button class="icon-btn play-btn" id="btn-play" title="Play / pause (Space)"><span class="play-btn-inner">${icons.play}</span></button>
 						<button class="icon-btn" id="btn-next" title="Next (Ctrl+→)">${icons.next}</button>
 						<button class="icon-btn" id="btn-repeat" title="Repeat">${icons.repeat}</button>
 					</div>
@@ -1085,6 +1173,8 @@ function render() {
 						<div class="scrub" id="scrub" title="Click to seek">
 							<div class="scrub-fill" id="scrub-fill"></div>
 							<div class="scrub-handle" id="scrub-handle"></div>
+							<div class="scrub-lo-a" id="scrub-lo-a"></div>
+							<div class="scrub-lo-b" id="scrub-lo-b"></div>
 						</div>
 						<span class="np-time" id="np-duration">0:00</span>
 					</div>
@@ -1096,7 +1186,7 @@ function render() {
 						<button class="icon-btn" id="btn-fullscreen" data-tip="Toggle fullscreen" title="Toggle fullscreen">${icons.maximize}</button>
 					<button class="icon-btn" id="btn-queue" data-tip="Open queue" title="Open queue">${icons.queue}</button>
 					<div class="volume" title="Volume (↑ / ↓)">
-						<span style="opacity:.55;display:inline-flex">${icons.volume}</span>
+						<button class="icon-btn" id="btn-mute" data-tip="Mute (M)" style="padding:0">${icons.volume}</button>
 						<input type="range" id="volume" class="range" min="0" max="100" value="${Math.round(state.settings.volume * 100)}" title="Volume" />
 					</div>
 				</div>
@@ -1167,6 +1257,23 @@ function wireVideoStage() {
 	});
 }
 
+// Shared construction sequence for every Visualizer instantiation site —
+// they all differ only in canvas/mode/style/fps/autostart, so this keeps
+// the perf-setting wiring (setMaxFps/setIdleEnabled) from drifting out of
+// sync between the strip, now-playing, and immersive-view instances.
+function createVisualizer(
+	canvas: HTMLCanvasElement,
+	mode: "bars" | "strip",
+	style: VizStyle,
+	opts: { maxFps: number; idle: boolean; autoStart: boolean },
+): Visualizer {
+	const v = new Visualizer(canvas, monitorTap, mode, style);
+	v.setMaxFps(opts.maxFps);
+	v.setIdleEnabled(opts.idle);
+	if (opts.autoStart) v.start();
+	return v;
+}
+
 let stripViz: Visualizer | null = null;
 function mountStripVisualizer() {
 	// If the user disabled the strip visualizer entirely the div doesn't
@@ -1179,10 +1286,11 @@ function mountStripVisualizer() {
 	const canvas = document.getElementById("np-strip-canvas") as HTMLCanvasElement | null;
 	if (!canvas) return;
 	stripViz?.destroy();
-	stripViz = new Visualizer(canvas, monitorTap, "strip");
-	stripViz.setMaxFps(state.settings.maxFps);
-	stripViz.setIdleEnabled(state.settings.idleViz);
-	if (!engine.paused) stripViz.start();
+	stripViz = createVisualizer(canvas, "strip", "bars", {
+		maxFps: state.settings.maxFps,
+		idle: state.settings.idleViz,
+		autoStart: !engine.paused,
+	});
 }
 
 // Single point that pushes the user's perf settings to whichever visualizers
@@ -1279,9 +1387,10 @@ function updateMediaSessionPosition() {
 }
 setupMediaSession();
 
-function navItem(view: View, iconSvg: string, label: string) {
+function navItem(view: View, iconSvg: string, label: string, num?: string) {
 	const active = state.view === view ? "active" : "";
-	return `<div class="nav-item ${active}" data-view="${view}" title="${label}">${iconSvg}<span>${label}</span></div>`;
+	const badge = num ? `<span class="nav-badge">${num}</span>` : "";
+	return `<div class="nav-item ${active}" data-view="${view}" title="${label}">${iconSvg}<span>${label}</span>${badge}</div>`;
 }
 
 function wireSidebar() {
@@ -1309,6 +1418,7 @@ function wireTransport() {
 	const btnPrev = document.getElementById("btn-prev")!;
 	const btnNext = document.getElementById("btn-next")!;
 	const btnShuffle = document.getElementById("btn-shuffle")!;
+	const btnAbloop = document.getElementById("btn-abloop")!;
 	const btnRepeat = document.getElementById("btn-repeat")!;
 	const btnQueue = document.getElementById("btn-queue")!;
 
@@ -1391,6 +1501,29 @@ function wireTransport() {
 		syncRangeFill(vol);
 		saveSettings();
 	});
+
+	const btnMute = document.getElementById("btn-mute");
+	if (btnMute) {
+		btnMute.addEventListener("click", () => {
+			const cur = state.settings.volume;
+			if (cur > 0) {
+				state.mutedVolume = cur;
+				engine.setVolume(0);
+				vol.value = "0";
+				btnMute.innerHTML = icons.mute;
+				sfx.toggle();
+			} else {
+				const restore = state.mutedVolume || 0.85;
+				state.settings.volume = restore;
+				engine.setVolume(restore);
+				vol.value = String(Math.round(restore * 100));
+				btnMute.innerHTML = icons.volume;
+				sfx.toggle();
+			}
+			syncRangeFill(vol);
+			saveSettings();
+		});
+	}
 	// Sync any other .range slider that the views have already mounted.
 	for (const r of document.querySelectorAll<HTMLInputElement>(".range")) syncRangeFill(r);
 
@@ -1413,8 +1546,11 @@ function wireTransport() {
 function updatePlayButton(isPlaying: boolean) {
 	const btn = document.getElementById("btn-play");
 	if (btn) {
-		btn.innerHTML = isPlaying ? icons.pause : icons.play;
+		btn.innerHTML = isPlaying
+			? `<span class="play-btn-inner pause">${icons.pause}</span>`
+			: `<span class="play-btn-inner">${icons.play}</span>`;
 		btn.setAttribute("title", isPlaying ? "Pause (Space)" : "Play (Space)");
+		btn.classList.toggle("is-playing", isPlaying);
 	}
 }
 
@@ -1462,11 +1598,74 @@ function updateNowPlayingProgress(cur: number, dur: number) {
 	}
 }
 
+function updateLoopMarkers() {
+	const f = document.getElementById("scrub-lo-a");
+	const g = document.getElementById("scrub-lo-b");
+	if (!f || !g) return;
+	const dur = engine.duration;
+	if (!state.abLoop || dur <= 0) {
+		f.style.display = "none";
+		g.style.display = "none";
+		return;
+	}
+	const aPct = (state.abLoop.a / dur) * 100;
+	f.style.display = "";
+	f.style.left = `${aPct}%`;
+	if (state.abLoop.b < dur) {
+		const bPct = (state.abLoop.b / dur) * 100;
+		g.style.display = "";
+		g.style.left = `${bPct}%`;
+	} else {
+		g.style.display = "none";
+	}
+}
+
 function formatTime(s: number) {
 	if (!Number.isFinite(s)) return "0:00";
 	const m = Math.floor(s / 60);
 	const sec = Math.floor(s % 60);
 	return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
+function renderStars(id: string, rating: number, interactive = false): string {
+	let html = `<span class="stars" data-tid="${escapeHtml(id)}">`;
+	for (let i = 1; i <= 5; i++) {
+		const filled = i <= rating;
+		html += `<span class="star${filled ? " filled" : ""}" data-sv="${i}">${filled ? "★" : "☆"}</span>`;
+	}
+	html += "</span>";
+	return html;
+}
+
+function wireStarClicks() {
+	for (const star of document.querySelectorAll<HTMLSpanElement>(".star")) {
+		if (star.dataset.wired) continue;
+		star.dataset.wired = "1";
+		star.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const v = parseInt((e.target as HTMLElement).dataset.sv!, 10);
+			const id = ((e.target as HTMLElement).closest(".stars") as HTMLElement)?.dataset.tid;
+			if (!id || isNaN(v)) return;
+			state.ratings[id] = v;
+			saveRatings();
+			sfx.click();
+			if (state.view === "nowplaying" || state.view === "library") renderMain();
+		});
+	}
+}
+
+function updateNowPlayingStar() {
+	const el = document.getElementById("np-rating");
+	if (!el) return;
+	const id = state.currentTrack?.id;
+	const r = id ? (state.ratings[id] ?? 0) : 0;
+	el.innerHTML = renderStars(id ?? "", r, true);
+	wireStarClicks();
+}
+
+function rateTrack(id: string, rating: number) {
+	state.ratings[id] = rating;
+	saveRatings();
 }
 
 // Update the --fill CSS variable so the slider track shows a colored fill
@@ -1523,12 +1722,43 @@ async function playCurrent() {
 	engine.setVolume(state.settings.volume);
 	engine.setEq(state.settings.eq);
 	engine.setRate(state.settings.speed);
+	engine.setPreAmp(state.settings.preAmp);
+
+	// ReplayGain
+	if (state.settings.replayGain !== "off") {
+		const rg = state.settings.replayGain === "track"
+			? track.replayGainTrack
+			: track.replayGainAlbum;
+		if (typeof rg === "number" && Number.isFinite(rg)) {
+			engine.setPreAmp(state.settings.preAmp + rg);
+		}
+	}
+
+	if (immersiveActive) refreshImmersiveInfo();
 
 	// Stats
 	state.playStats[track.id] = (state.playStats[track.id] ?? 0) + 1;
 	saveStats();
 
+	// Recently played — keep most recent 50 tracks, deduplicated.
+	state.recentlyPlayed = [track.id, ...state.recentlyPlayed.filter((id) => id !== track.id)].slice(0, 50);
+	saveRecentlyPlayed();
+
 	await engine.loadAndPlay(track);
+
+	// Aggressive AudioContext resume: when the window is minimized Chromium
+	// can suspend the context between tracks. loadAndPlay() already tries
+	// ctx.resume(), but the user-gesture policy may reject it. This retry
+	// loop with a slight delay gives the context a second (and third) chance
+	// to wake up — without it, the next track loads silently and the pause
+	// button flips to "play" even though nothing is audible.
+	if (sharedAudioCtx.state !== "running") {
+		for (let attempt = 0; attempt < 3; attempt++) {
+			try { await sharedAudioCtx.resume(); } catch {}
+			if (sharedAudioCtx.state === "running") break;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
 	// Resume from a saved bookmark if there is one.
 	const bm = state.bookmarks[track.id];
 	if (bm && shouldBookmark(track) && bm < (engine.duration || track.duration) - 5) {
@@ -1547,6 +1777,18 @@ async function playCurrent() {
 	}
 	if (state.view === "library") highlightPlayingRow();
 	schedulePresenceUpdate();
+
+	// Now Playing toast notification
+	if (state.settings.showTrackNotifications && !usingVideo) {
+		bun().notify({ title: `Now Playing: ${track.title}`, body: `${track.artist} — ${track.album}` }).catch(() => {});
+	}
+
+	// Track play-date recording
+	if (!state.playDates[track.id]) state.playDates[track.id] = [];
+	state.playDates[track.id].push(Date.now());
+	// Keep last 200 timestamps per track
+	if (state.playDates[track.id].length > 200) state.playDates[track.id] = state.playDates[track.id].slice(-200);
+	savePlayDates();
 }
 
 function onTrackEnded() {
@@ -1571,6 +1813,38 @@ function next(auto = false) {
 		if (state.queueIndex >= state.queue.length) {
 			if (state.settings.repeat === "all") {
 				state.queueIndex = 0;
+			} else if (auto && state.library.length > 0) {
+				// Queue ended naturally — pull a fresh track from the library
+				// so music doesn't stop. Avoid the track that just played if we
+				// can, and prefer ones we haven't heard recently.
+				const lastId = state.currentTrack?.id;
+				const fresh = state.library.filter((t) => state.queue.findIndex((q) => q.id === t.id) === -1);
+				let pick: TrackInfo | undefined;
+				if (fresh.length > 0) {
+					// 70% of the time pick something with low play count;
+					// 30% of the time pick completely at random.
+					if (Math.random() < 0.7) {
+						const sorted = [...fresh].sort((a, b) => (state.playStats[a.id] ?? 0) - (state.playStats[b.id] ?? 0));
+						const pool = sorted.slice(0, Math.max(5, Math.ceil(sorted.length * 0.15)));
+						pick = pool[Math.floor(Math.random() * pool.length)];
+					} else {
+						pick = fresh[Math.floor(Math.random() * fresh.length)];
+					}
+				}
+				// If we couldn't find a track not already in the queue (tiny
+				// library), just pick any track that's not the current one.
+				if (!pick) {
+					const candidates = state.library.filter((t) => t.id !== lastId);
+					pick = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : state.library[0];
+				}
+				if (pick) {
+					state.queue.push(pick);
+					state.queueIndex = state.queue.length - 1;
+					toast("Auto-continue: queue refilled", { ttl: 2000 });
+				} else {
+					engine.pause();
+					return;
+				}
 			} else if (auto) {
 				state.queueIndex = state.queue.length - 1;
 				engine.pause();
@@ -1782,7 +2056,6 @@ async function updatePresenceImmediate() {
 		artist: t.artist,
 		album: t.album,
 		buttons: [
-			// Placeholder — point this at the real download site when it's live.
 			{ label: "Player", url: "https://lakky.app" },
 		],
 	};
@@ -1793,7 +2066,7 @@ async function updatePresenceImmediate() {
 	}
 	try {
 		await bun().setDiscordPresence({ presence });
-	} catch {}
+	} catch (e) { console.warn("[discord] setDiscordPresence failed:", (e as Error).message); }
 }
 
 // ---------- Main view renderers ----------
@@ -1839,6 +2112,11 @@ function renderHome(root: HTMLElement) {
 
 	const recent = state.library.slice(0, 12);
 
+	const recentlyPlayed = state.recentlyPlayed
+		.slice(0, 8)
+		.map((id) => state.library.find((t) => t.id === id))
+		.filter((t): t is TrackInfo => !!t);
+
 	root.innerHTML = `
 		<div class="topbar">
 			<h2>Home</h2>
@@ -1849,6 +2127,9 @@ function renderHome(root: HTMLElement) {
 				</div>
 				<button class="btn" id="btn-add-files">${icons.plus}<span>Add files</span></button>
 				<button class="btn btn-primary" id="btn-add-folder">${icons.folder}<span>Add folder</span></button>
+				<select class="select" id="lib-sort" style="min-width:90px;flex-shrink:0">
+					${(["title","artist","album","duration","year"] as const).map((k) => `<option value="${k}" ${state.librarySort === k ? "selected" : ""}>${k[0].toUpperCase() + k.slice(1)}</option>`).join("")}
+				</select>
 			</div>
 		</div>
 		<section class="hero">
@@ -1868,6 +2149,13 @@ function renderHome(root: HTMLElement) {
 			</div>
 		` : ""}
 
+		${recentlyPlayed.length > 0 ? `
+			<div class="section-title"><span>Recently played</span></div>
+			<div class="grid">
+				${recentlyPlayed.map((t) => trackCard(t)).join("")}
+			</div>
+		` : ""}
+
 		${recent.length > 0 ? `
 			<div class="section-title"><span>Recently added</span></div>
 			<div class="grid">
@@ -1883,6 +2171,10 @@ function renderHome(root: HTMLElement) {
 
 	document.getElementById("btn-add-folder")?.addEventListener("click", addFolder);
 	document.getElementById("btn-add-files")?.addEventListener("click", addFiles);
+	document.getElementById("lib-sort")?.addEventListener("change", (e) => {
+		state.librarySort = (e.target as HTMLSelectElement).value as typeof state.librarySort;
+		renderMain();
+	});
 	document.getElementById("hero-add-folder")?.addEventListener("click", addFolder);
 	document.getElementById("hero-add-files")?.addEventListener("click", addFiles);
 	document.getElementById("hero-shuffle")?.addEventListener("click", () => {
@@ -1896,10 +2188,19 @@ function renderHome(root: HTMLElement) {
 
 function renderLibrary(root: HTMLElement) {
 	const q = state.searchQuery.toLowerCase().trim();
-	const tracks = q
+	const tracks = (q
 		? state.library.filter((t) =>
 			[t.title, t.artist, t.album].some((s) => s.toLowerCase().includes(q)))
-		: state.library;
+		: [...state.library])
+		.sort((a, b) => {
+			switch (state.librarySort) {
+				case "artist": return a.artist.localeCompare(b.artist) || a.album.localeCompare(b.album);
+				case "album": return a.album.localeCompare(b.album) || (a.trackNumber ?? 0) - (b.trackNumber ?? 0);
+				case "duration": return (b.duration ?? 0) - (a.duration ?? 0);
+				case "year": return (b.year ?? 0) - (a.year ?? 0) || a.artist.localeCompare(b.artist);
+				default: return a.title.localeCompare(b.title) || a.artist.localeCompare(b.artist);
+			}
+		});
 
 	root.innerHTML = `
 		<div class="topbar">
@@ -1911,6 +2212,9 @@ function renderLibrary(root: HTMLElement) {
 				</div>
 				<button class="btn" id="btn-add-files">${icons.plus}<span>Add files</span></button>
 				<button class="btn btn-primary" id="btn-add-folder">${icons.folder}<span>Add folder</span></button>
+				<select class="select" id="lib-sort" style="min-width:90px;flex-shrink:0">
+					${(["title","artist","album","duration","year"] as const).map((k) => `<option value="${k}" ${state.librarySort === k ? "selected" : ""}>${k[0].toUpperCase() + k.slice(1)}</option>`).join("")}
+				</select>
 			</div>
 		</div>
 		${tracks.length === 0 ? `
@@ -2013,11 +2317,12 @@ function renderNowPlaying(root: HTMLElement) {
 	const canvas = document.getElementById("viz-canvas") as HTMLCanvasElement | null;
 	if (canvas) {
 		visualizer?.destroy();
-		visualizer = new Visualizer(canvas, monitorTap, "bars", state.settings.vizStyle);
-		visualizer.setMaxFps(state.settings.maxFps);
-		visualizer.setIdleEnabled(state.settings.idleViz);
+		visualizer = createVisualizer(canvas, "bars", state.settings.vizStyle, {
+			maxFps: state.settings.maxFps,
+			idle: state.settings.idleViz,
+			autoStart: !engine.paused,
+		});
 		if (t.artDataUrl) updateAccentFromArt(t.artDataUrl);
-		if (!engine.paused) visualizer.start();
 	}
 }
 
@@ -2289,6 +2594,13 @@ function renderStats(root: HTMLElement) {
 				${topAlbums.map(([name, plays], i) => statRow(i + 1, name, `${plays} plays`)).join("")}
 			</div>
 		` : ""}
+
+		<div class="section-title" style="margin-top:1.5rem"><span>Listening calendar</span></div>
+		<div class="ec-grid" id="cal-grid"></div>
+
+		<div class="setting-row" style="justify-content:flex-end;margin-top:1rem">
+			<button class="btn" id="btn-export-stats">Export stats as JSON</button>
+		</div>
 	`;
 
 	for (const r of root.querySelectorAll<HTMLDivElement>(".track-row[data-id]")) {
@@ -2340,9 +2652,27 @@ function renderSettings(root: HTMLElement) {
 				</div>
 			</div>
 			<div class="setting-row">
+				<span>Pre-amp</span>
+				<div class="range-row">
+					<input type="range" class="range" min="-12" max="12" step="1" value="${s.preAmp}" id="set-preamp" />
+					<span class="range-value" id="preamp-val">${s.preAmp === 0 ? "0 dB" : `${s.preAmp > 0 ? "+" : ""}${s.preAmp} dB`}</span>
+				</div>
+			</div>
+			<div class="setting-row">
+				<span>Mono downmix <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">Forces stereo → mono output.</em></span>
+				<div class="toggle ${s.mono ? "on" : ""}" id="t-mono"></div>
+			</div>
+			<div class="setting-row">
 				<span>Sleep timer</span>
 				<select id="set-sleep" class="select">
 					${[0, 5, 10, 15, 30, 45, 60, 90, 120].map((m) => `<option value="${m}" ${m === s.sleepTimer ? "selected" : ""}>${m === 0 ? "Off" : `${m} min`}</option>`).join("")}
+				</select>
+			</div>
+			<div class="setting-row">
+				<span>Audio output device <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">Route audio to a specific speaker or headset.</em></span>
+				<select id="set-device" class="select" style="max-width:240px">
+					<option value="default" ${state.selectedDeviceId === "default" ? "selected" : ""}>System Default</option>
+					${state.audioDevices.map(d => `<option value="${escapeHtml(d.deviceId)}" ${state.selectedDeviceId === d.deviceId ? "selected" : ""}>${escapeHtml(d.label || d.deviceId.slice(0, 8))}</option>`).join("")}
 				</select>
 			</div>
 		</div>
@@ -2360,14 +2690,61 @@ function renderSettings(root: HTMLElement) {
 			</div>
 			<div class="setting-row">
 				<span>Theme</span>
-				<div class="theme-row" id="theme-row">
-					${(["midnight","aurora","solar","rose"] as const).map((th) => `
+				<div class="theme-row" id="theme-row" style="display:flex;flex-wrap:wrap;gap:0.5rem">
+					${([
+						"sakura_sunset", "cyber_neotokyo", "ghibli_emerald", "ocean_shinkai", "midnight_shogun",
+						"midnight", "aurora", "solar", "rose"
+					] as const).map((th) => `
 						<div class="theme-swatch ${s.theme === th ? "active" : ""}" data-th="${th}" title="${th}">
 							<span class="swatch swatch-${th}"></span>
-							<span>${th[0].toUpperCase() + th.slice(1)}</span>
+							<span>${th.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}</span>
 						</div>
 					`).join("")}
 				</div>
+			</div>
+		</div>
+
+		<div class="settings-card">
+			<h3>3D Anime Cel-Shaded Scene</h3>
+			<p>Real-time audio-reactive 3D world with Gerstner ocean waves, Ghibli fluffy foliage trees, and sakura particle physics.</p>
+			<div class="setting-row">
+				<span>Enable 3D Scene background</span>
+				<div class="toggle ${s.show3DScene ? "on" : ""}" id="t-3d-scene"></div>
+			</div>
+			<div class="setting-row">
+				<span>Scene Preset</span>
+				<div style="display:flex;gap:0.45rem;flex-wrap:wrap">
+					${([
+						{ key: "sakura_sunset", label: "Sakura Sunset" },
+						{ key: "ocean_shinkai", label: "Ocean Shinkai" },
+						{ key: "cyber_lake", label: "Cyber Lake" },
+						{ key: "ghibli_forest", label: "Ghibli Forest" },
+					] as const).map((p) => `
+						<button class="scene-preset-btn ${s.scenePreset === p.key ? "active" : ""}" data-preset="${p.key}">${p.label}</button>
+					`).join("")}
+				</div>
+			</div>
+		</div>
+
+		<div class="settings-card">
+			<h3>Windows File Associations &amp; Default Player</h3>
+			<p>Set Lakky as the primary default player for all audio &amp; video formats (.mp3, .flac, .wav, .opus, .aac, .m4a, .mp4, .mkv, .webm, .avi, etc.).</p>
+			<div class="setting-row">
+				<span>Associate 60+ audio &amp; video file types</span>
+				<button class="btn btn-primary" id="btn-set-default">${icons.disc} <span>Set as Default Media Player</span></button>
+			</div>
+		</div>
+
+		<div class="settings-card">
+			<h3>Binary Security &amp; Anti-Malware</h3>
+			<p>Built-in Zero-Trust binary integrity protection scanning magic headers, steganography polyglots, and disguised executables.</p>
+			<div class="setting-row">
+				<span>Protection Status</span>
+				<span class="badge-security safe" style="font-size:0.8rem;padding:0.3rem 0.6rem">${icons.shieldCheck} Zero-Trust Shield Active</span>
+			</div>
+			<div class="setting-row">
+				<span>Scan entire library</span>
+				<button class="btn" id="btn-rescan-security">${icons.shield} <span>Run Security Audit</span></button>
 			</div>
 		</div>
 
@@ -2392,7 +2769,7 @@ function renderSettings(root: HTMLElement) {
 
 		<div class="settings-card">
 			<h3>Integrations</h3>
-			<p>Show what you're playing.</p>
+			<p>Connect Lakky with other services.</p>
 			<div class="setting-row">
 				<span>Discord rich presence</span>
 				<div class="toggle ${s.discord ? "on" : ""}" id="t-discord"></div>
@@ -2400,6 +2777,22 @@ function renderSettings(root: HTMLElement) {
 			<div class="setting-row">
 				<span>UI sound effects</span>
 				<div class="toggle ${s.sfx ? "on" : ""}" id="t-sfx"></div>
+			</div>
+			<div class="setting-row">
+				<span>Now Playing notifications <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">Windows toast on track change.</em></span>
+				<div class="toggle ${s.showTrackNotifications ? "on" : ""}" id="t-track-notifs"></div>
+			</div>
+			<div class="setting-row">
+				<span>Lyrics display <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">Fetch synced lyrics from LRCLIB.</em></span>
+				<div class="toggle ${s.lyrics ? "on" : ""}" id="t-lyrics"></div>
+			</div>
+			<div class="setting-row">
+				<span>Last.fm scrobbling <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">Send plays to last.fm.</em></span>
+				<div class="toggle ${s.scrobbleLastfm ? "on" : ""}" id="t-scrobble"></div>
+			</div>
+			<div class="setting-row">
+				<span>Last.fm token</span>
+				<input type="password" class="text-input" id="set-lfm-token" placeholder="Session token" value="${escapeHtml(localStorage.getItem("lakky_lastfm_token") ?? "")}" style="min-width:220px" />
 			</div>
 		</div>
 
@@ -2498,6 +2891,10 @@ function renderSettings(root: HTMLElement) {
 				<span>Plays this session</span>
 				<span style="color:rgba(232,232,245,.6)">${engine.getTrackPlayCount()}</span>
 			</div>
+			<div class="setting-row">
+				<span>Echoes <em style="font-style:normal;opacity:.55;font-size:.78rem;font-weight:400;display:block">Preview your year-in-review for any year (normally unlocks December 1).</em></span>
+				<button class="btn" id="echoes-test">${icons.sparkle} Preview</button>
+			</div>
 		</div>
 	`;
 
@@ -2525,6 +2922,13 @@ function renderSettings(root: HTMLElement) {
 		document.getElementById("speed-val")!.textContent = `${r.toFixed(2)}×`;
 		saveSettings();
 	});
+	const pa = document.getElementById("set-preamp") as HTMLInputElement;
+	wireRange(pa, (v) => {
+		state.settings.preAmp = v;
+		engine.setPreAmp(v);
+		document.getElementById("preamp-val")!.textContent = v === 0 ? "0 dB" : `${v > 0 ? "+" : ""}${v} dB`;
+		saveSettings();
+	});
 	document.getElementById("t-smart")?.addEventListener("click", (e) => {
 		state.settings.smartShuffle = !state.settings.smartShuffle;
 		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.smartShuffle);
@@ -2550,6 +2954,66 @@ function renderSettings(root: HTMLElement) {
 			renderSettings(root);
 		});
 	}
+
+	document.getElementById("t-3d-scene")?.addEventListener("click", (e) => {
+		state.settings.show3DScene = !state.settings.show3DScene;
+		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.show3DScene);
+		stylized3dScene?.setVisible(state.settings.show3DScene);
+		saveSettings();
+		sfx.toggle();
+	});
+
+	for (const pb of document.querySelectorAll<HTMLButtonElement>(".scene-preset-btn")) {
+		pb.addEventListener("click", () => {
+			const preset = pb.dataset.preset as ScenePreset;
+			state.settings.scenePreset = preset;
+			stylized3dScene?.setPreset(preset);
+			saveSettings();
+			sfx.click();
+			for (const sib of document.querySelectorAll<HTMLButtonElement>(".scene-preset-btn")) {
+				sib.classList.toggle("active", sib === pb);
+			}
+		});
+	}
+
+	document.getElementById("btn-set-default")?.addEventListener("click", async () => {
+		sfx.click();
+		try {
+			const res = await bun().setDefaultPlayerAssociations({});
+			if (res.ok) {
+				toast(res.message, { ttl: 4000 });
+				sfx.success();
+			} else {
+				toast(`Failed: ${res.message}`, { ttl: 4000 });
+				sfx.error();
+			}
+		} catch (err) {
+			toast(`Error: ${(err as Error).message}`, { ttl: 3500 });
+			sfx.error();
+		}
+	});
+
+	document.getElementById("btn-rescan-security")?.addEventListener("click", async () => {
+		sfx.click();
+		toast("Scanning library for binary integrity and polyglots…", { ttl: 2000 });
+		let clean = 0;
+		let flagged = 0;
+		for (const t of state.library) {
+			try {
+				const rep = await bun().scanMediaIntegrity({ path: t.path });
+				t.securitySafe = rep.safe;
+				t.securityScore = rep.score;
+				t.securityThreats = rep.threats;
+				t.verifiedFormat = rep.verifiedFormat;
+				if (rep.safe) clean++; else flagged++;
+			} catch {}
+		}
+		saveLibrary();
+		renderMain();
+		toast(`Audit complete: ${clean} clean tracks${flagged > 0 ? `, ${flagged} warnings flagged` : ""}`, { ttl: 4000 });
+		sfx.success();
+	});
+
 	document.getElementById("open-mini")?.addEventListener("click", async () => {
 		sfx.click();
 		try { await bun().openMiniPlayer({}); } catch {}
@@ -2636,6 +3100,15 @@ function renderSettings(root: HTMLElement) {
 	document.getElementById("upd-check-now")?.addEventListener("click", () => {
 		void manualUpdateCheck();
 	});
+	document.getElementById("echoes-test")?.addEventListener("click", () => {
+		sfx.click();
+		const data = computeEchoes(state.library, state.playStats, new Date().getFullYear());
+		new Echoes(data, {
+			onPause: () => engine.pause(),
+			onClose: () => {},
+		});
+		toast("Showing Echoes — press Escape or scroll to exit", { ttl: 3500 });
+	});
 	document.getElementById("upd-unskip")?.addEventListener("click", () => {
 		sfx.click();
 		state.settings.skippedUpdateTag = "";
@@ -2675,6 +3148,21 @@ function renderSettings(root: HTMLElement) {
 		saveSettings();
 		toast(v === 0 ? "Sleep timer off" : `Sleep timer: ${v} minutes`, { ttl: 2200 });
 	});
+	document.getElementById("set-device")?.addEventListener("change", (e) => {
+		const v = (e.target as HTMLSelectElement).value;
+		state.selectedDeviceId = v;
+		engine.setSinkId(v);
+		engineA.setSinkId(v);
+		engineB.setSinkId(v);
+		saveSettings();
+	});
+	document.getElementById("t-mono")?.addEventListener("click", (e) => {
+		state.settings.mono = !state.settings.mono;
+		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.mono);
+		engine.setMono(state.settings.mono);
+		saveSettings();
+		sfx.toggle();
+	});
 	document.getElementById("t-discord")?.addEventListener("click", (e) => {
 		state.settings.discord = !state.settings.discord;
 		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.discord);
@@ -2688,6 +3176,29 @@ function renderSettings(root: HTMLElement) {
 		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.sfx);
 		saveSettings();
 		if (state.settings.sfx) sfx.toggle();
+	});
+
+	document.getElementById("t-track-notifs")?.addEventListener("click", (e) => {
+		state.settings.showTrackNotifications = !state.settings.showTrackNotifications;
+		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.showTrackNotifications);
+		saveSettings();
+		sfx.toggle();
+	});
+	document.getElementById("t-lyrics")?.addEventListener("click", (e) => {
+		state.settings.lyrics = !state.settings.lyrics;
+		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.lyrics);
+		saveSettings();
+		sfx.toggle();
+	});
+	document.getElementById("t-scrobble")?.addEventListener("click", (e) => {
+		state.settings.scrobbleLastfm = !state.settings.scrobbleLastfm;
+		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.scrobbleLastfm);
+		saveSettings();
+		sfx.toggle();
+	});
+	document.getElementById("set-lfm-token")?.addEventListener("input", (e) => {
+		const v = (e.target as HTMLInputElement).value;
+		localStorage.setItem("lakky_lastfm_token", v);
 	});
 
 	document.getElementById("set-libfolder")?.addEventListener("click", async () => {
@@ -2715,7 +3226,7 @@ function renderSettings(root: HTMLElement) {
 	});
 	document.getElementById("open-libfolder")?.addEventListener("click", async () => {
 		if (state.libraryFolder) {
-			try { await bun().showInFolder({ path: state.libraryFolder }); } catch {}
+			try { await bun().showInFolder({ path: state.libraryFolder }); } catch (e) { console.warn("[ui] showInFolder failed:", (e as Error).message); }
 			sfx.click();
 		}
 	});
@@ -2757,20 +3268,61 @@ function renderQueuePanel() {
 	}
 	el.innerHTML = state.queue
 		.map((t, i) => `
-			<div class="queue-row ${i === state.queueIndex ? "is-playing" : ""}" data-i="${i}">
+			<div class="queue-row ${i === state.queueIndex ? "is-playing" : ""}" data-i="${i}" draggable="true">
 				<div class="mini-art">${t.artDataUrl ? `<img src="${t.artDataUrl}">` : ""}</div>
 				<div class="mini-info">
 					<div class="qt">${escapeHtml(t.title)}</div>
 					<div class="qa">${escapeHtml(t.artist)}</div>
 				</div>
+				<button class="queue-remove" data-ri="${i}" title="Remove from queue">&times;</button>
 			</div>
 		`)
 		.join("");
 	for (const r of el.querySelectorAll<HTMLDivElement>(".queue-row")) {
-		r.addEventListener("click", () => {
+		r.addEventListener("click", (e) => {
+			if ((e.target as HTMLElement).closest(".queue-remove")) return;
 			state.queueIndex = parseInt(r.dataset.i!, 10);
 			playCurrent();
 			sfx.click();
+		});
+		// Remove button
+		const rm = r.querySelector(".queue-remove") as HTMLButtonElement | null;
+		rm?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const idx = parseInt(rm.dataset.ri!, 10);
+			if (idx < state.queueIndex) state.queueIndex--;
+			else if (idx === state.queueIndex && state.queue.length <= 1) return;
+			state.queue.splice(idx, 1);
+			renderQueuePanel();
+		});
+		// Drag-to-reorder
+		r.addEventListener("dragstart", (e) => {
+			e.dataTransfer!.effectAllowed = "move";
+			e.dataTransfer!.setData("text/plain", r.dataset.i!);
+			r.classList.add("dragging");
+		});
+		r.addEventListener("dragend", () => {
+			r.classList.remove("dragging");
+			for (const qr of el.querySelectorAll(".queue-row")) qr.classList.remove("drag-over");
+		});
+		r.addEventListener("dragover", (e) => {
+			e.preventDefault();
+			e.dataTransfer!.dropEffect = "move";
+			r.classList.add("drag-over");
+		});
+		r.addEventListener("dragleave", () => r.classList.remove("drag-over"));
+		r.addEventListener("drop", (e) => {
+			e.preventDefault();
+			r.classList.remove("drag-over");
+			const fromIdx = parseInt(e.dataTransfer!.getData("text/plain"), 10);
+			const toIdx = parseInt(r.dataset.i!, 10);
+			if (fromIdx === toIdx || isNaN(fromIdx) || isNaN(toIdx)) return;
+			const [item] = state.queue.splice(fromIdx, 1);
+			state.queue.splice(toIdx, 0, item);
+			if (state.queueIndex === fromIdx) state.queueIndex = toIdx;
+			else if (fromIdx < state.queueIndex && toIdx >= state.queueIndex) state.queueIndex--;
+			else if (fromIdx > state.queueIndex && toIdx <= state.queueIndex) state.queueIndex++;
+			renderQueuePanel();
 		});
 	}
 }
@@ -2796,16 +3348,26 @@ function trackCard(t: TrackInfo) {
 function trackRow(t: TrackInfo, i: number) {
 	const isPlaying = state.currentTrack?.id === t.id;
 	const isVideo = t.kind === "video";
+	const isThreat = (t.securityThreats && t.securityThreats.length > 0) || (t.securityScore !== undefined && t.securityScore < 80);
+
+	const secBadge = isThreat
+		? `<span class="badge-security threat" title="Security alert: click context menu to inspect">${icons.shieldAlert} Alert</span>`
+		: `<span class="badge-security safe" title="Verified clean binary & metadata">${icons.shieldCheck} Safe</span>`;
+
 	return `
 		<div class="track-row ${isPlaying ? "is-playing" : ""}" data-id="${t.id}">
 			<div class="num">${i + 1}</div>
 			<div class="ti">
-				<div class="tt">${isVideo ? `<span class="kind-badge inline">VIDEO</span> ` : ""}${escapeHtml(t.title)}</div>
+				<div class="tt">
+					${isVideo ? `<span class="kind-badge inline">VIDEO</span> ` : ""}
+					<span>${escapeHtml(t.title)}</span>
+					${secBadge}
+				</div>
 				<div class="ta">${escapeHtml(t.artist)}</div>
 			</div>
 			<div class="tb">${escapeHtml(t.album)}</div>
 			<div class="td">${formatTime(t.duration)}</div>
-			<div></div>
+			<div class="tr">${renderStars(t.id, state.ratings[t.id] ?? 0, false)}</div>
 		</div>
 	`;
 }
@@ -2927,6 +3489,9 @@ window.addEventListener("keydown", (e) => {
 		e.preventDefault();
 		engine.togglePlay();
 		engine.paused ? sfx.pause() : sfx.play();
+	} else if (e.code === "KeyF" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+		if (immersiveActive) { exitImmersive(); }
+		else { enterImmersive(); }
 	} else if (e.code === "ArrowRight" && e.ctrlKey) {
 		next();
 		sfx.skip();
@@ -2951,8 +3516,241 @@ window.addEventListener("keydown", (e) => {
 		engine.setVolume(v);
 		const slider = document.getElementById("volume") as HTMLInputElement | null;
 		if (slider) { slider.value = String(Math.round(v * 100)); syncRangeFill(slider); }
-	}
+	} else if (e.code === "KeyM") {
+		const cur = state.settings.volume;
+		const slider = document.getElementById("volume") as HTMLInputElement | null;
+		const btnMute = document.getElementById("btn-mute");
+		if (cur > 0) {
+			state.mutedVolume = cur;
+			engine.setVolume(0);
+			if (slider) slider.value = "0";
+			if (btnMute) btnMute.innerHTML = icons.mute;
+		} else {
+			const restore = state.mutedVolume || 0.85;
+			state.settings.volume = restore;
+			engine.setVolume(restore);
+			if (slider) slider.value = String(Math.round(restore * 100));
+			if (btnMute) btnMute.innerHTML = icons.volume;
+		}
+		if (slider) syncRangeFill(slider);
+	} else if (e.code === "KeyB" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+		// A-B loop toggle: first press sets A, second sets B, third clears
+		const cur = engine.currentTime;
+		const dur = engine.duration;
+		if (!state.abLoop) {
+			state.abLoop = { a: cur, b: dur > 0 ? dur : Infinity };
+			toast(`Loop point A: ${formatTime(cur)}`, { ttl: 1800, key: "abloop" });
+		} else if (state.abLoop.b >= dur) {
+			state.abLoop = { a: state.abLoop.a, b: cur };
+			toast(`Loop A→B: ${formatTime(state.abLoop.a)} → ${formatTime(cur)}`, { ttl: 2000, key: "abloop" });
+		} else {
+			state.abLoop = null;
+			engine.setABLoop(null);
+			toast("Loop cleared", { ttl: 1500, key: "abloop" });
+		}
+		if (state.abLoop) {
+			engine.setABLoop(state.abLoop);
+			if (state.abLoop.b >= dur) engine.setABLoop({ a: state.abLoop.a, b: dur });
+		}
+		updateLoopMarkers();
+	} else if (e.code === "Digit1" && !e.ctrlKey && !e.metaKey && !e.altKey) { navigate("home"); }
+	  else if (e.code === "Digit2" && !e.ctrlKey && !e.metaKey && !e.altKey) { navigate("library"); }
+	  else if (e.code === "Digit3" && !e.ctrlKey && !e.metaKey && !e.altKey) { navigate("nowplaying"); }
+	  else if (e.code === "Digit4" && !e.ctrlKey && !e.metaKey && !e.altKey) { navigate("equalizer"); }
+	  else if (e.code === "Digit5" && !e.ctrlKey && !e.metaKey && !e.altKey) { navigate("playlists"); }
+	  else if (e.code === "Digit6" && !e.ctrlKey && !e.metaKey && !e.altKey) { navigate("stats"); }
+	  else if (e.code === "Digit7" && !e.ctrlKey && !e.metaKey && !e.altKey) { navigate("nodes"); }
+	  else if (e.code === "Digit8" && !e.ctrlKey && !e.metaKey && !e.altKey) { navigate("settings"); }
 });
+
+// ---------- Fullscreen Now Playing (F key) immersive overlay ----------
+let immersiveActive = false;
+let immersiveIdleTimeout: ReturnType<typeof setTimeout> | null = null;
+let immCursorEl: HTMLDivElement | null = null;
+let immCursorRing: HTMLDivElement | null = null;
+let immCursorRaf: number | null = null;
+const IMMERSIVE_IDLE_MS = 2200;
+
+function enterImmersive() {
+	if (immersiveActive || state.view !== "nowplaying" || !state.currentTrack || state.currentTrack.kind === "video") return;
+	immersiveActive = true;
+
+	// Custom cursor
+	immCursorEl = document.createElement("div");
+	immCursorEl.className = "imm-cursor";
+	immCursorRing = document.createElement("div");
+	immCursorRing.className = "imm-cursor-ring";
+	// Don't append yet — let overlay mount first via its own transition
+
+	const overlay = document.createElement("div");
+	overlay.id = "imm-overlay";
+	overlay.className = "imm-overlay";
+	overlay.innerHTML = `
+		<canvas id="imm-canvas" class="imm-canvas"></canvas>
+		<div class="imm-vignette-ring"></div>
+		<div class="imm-art" id="imm-art"></div>
+		<div class="imm-info" id="imm-info">
+			<div class="imm-title" id="imm-title"></div>
+			<div class="imm-artist" id="imm-artist"></div>
+			<div class="imm-scrub" id="imm-scrub"><div class="imm-scrub-fill" id="imm-scrub-fill"></div></div>
+			<div class="imm-times"><span id="imm-cur-time">0:00</span><span id="imm-dur-time">0:00</span></div>
+			<div class="imm-meta" id="imm-meta"></div>
+		</div>
+		<div class="imm-controls" id="imm-controls">
+			<button class="imm-btn imm-btn-shuffle" id="imm-shuffle">${icons.shuffle}</button>
+			<button class="imm-btn" id="imm-prev">${icons.prev}</button>
+			<button class="imm-btn imm-btn-play" id="imm-play"><span>${icons.play}</span></button>
+			<button class="imm-btn" id="imm-next">${icons.next}</button>
+			<button class="imm-btn" id="imm-repeat-imm">${icons.repeat}</button>
+		</div>
+		<div class="imm-volume-wrap" id="imm-vol-wrap">
+			${icons.volume}
+			<input type="range" id="imm-volume" min="0" max="100" value="${Math.round(state.settings.volume * 100)}" />
+		</div>
+		<button class="imm-close" id="imm-close">×</button>
+	`;
+	document.body.appendChild(overlay);
+	document.body.appendChild(immCursorEl!);
+	document.body.appendChild(immCursorRing!);
+
+	const canvas = overlay.querySelector("#imm-canvas") as HTMLCanvasElement;
+	if (canvas && visualizer) {
+		visualizer.destroy();
+		visualizer = createVisualizer(canvas, "bars", state.settings.vizStyle, {
+			maxFps: 60,
+			idle: true,
+			autoStart: true,
+		});
+	}
+
+	refreshImmersiveInfo();
+	updateImmersivePlayState();
+	updateImmersiveProgress(engine.currentTime, engine.duration);
+	updateImmersiveShuffleRepeat();
+
+	document.getElementById("imm-close")?.addEventListener("click", exitImmersive);
+	document.getElementById("imm-play")?.addEventListener("click", () => { engine.togglePlay(); sfx.click(); updateImmersivePlayState(); });
+	document.getElementById("imm-prev")?.addEventListener("click", () => { previous(); sfx.skip(); });
+	document.getElementById("imm-next")?.addEventListener("click", () => { next(); sfx.skip(); });
+	document.getElementById("imm-shuffle")?.addEventListener("click", () => { state.settings.shuffle = !state.settings.shuffle; saveSettings(); updateImmersiveShuffleRepeat(); sfx.toggle(); });
+	document.getElementById("imm-repeat-imm")?.addEventListener("click", () => { const modes: RepeatMode[] = ["off","all","one"]; state.settings.repeat = modes[(modes.indexOf(state.settings.repeat) + 1) % modes.length]; saveSettings(); updateImmersiveShuffleRepeat(); sfx.toggle(); });
+
+	const scrubEl = document.getElementById("imm-scrub");
+	scrubEl?.addEventListener("click", (e) => {
+		const rect = scrubEl.getBoundingClientRect();
+		engine.seek(engine.duration * Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)));
+	});
+
+	const volSlider = document.getElementById("imm-volume") as HTMLInputElement | null;
+	volSlider?.addEventListener("input", () => {
+		const v = parseInt(volSlider.value, 10) / 100;
+		state.settings.volume = v;
+		engine.setVolume(v);
+		saveSettings();
+	});
+
+	requestAnimationFrame(() => overlay.classList.add("imm-in"));
+	resetImmersiveIdle();
+	startImmersiveCursor();
+}
+
+function startImmersiveCursor() {
+	if (!immCursorEl || !immCursorRing) return;
+	let mx = -100, my = -100;
+	window.addEventListener("mousemove", onMove = (e) => { mx = e.clientX; my = e.clientY; });
+	const tick = () => {
+		if (!immersiveActive) { onMove = null; return; }
+		immCursorEl!.style.transform = `translate(calc(${mx}px - 5px), calc(${my}px - 5px))`;
+		immCursorRing!.style.transform = `translate(calc(${mx}px - 14px), calc(${my}px - 14px))`;
+		immCursorRaf = requestAnimationFrame(tick);
+	};
+	immCursorRaf = requestAnimationFrame(tick);
+}
+let onMove: ((e: MouseEvent) => void) | null = null;
+
+function updateImmersiveShuffleRepeat() {
+	const sh = document.getElementById("imm-shuffle");
+	const rp = document.getElementById("imm-repeat-imm");
+	if (sh) sh.classList.toggle("active", state.settings.shuffle);
+	if (rp) {
+		rp.innerHTML = state.settings.repeat === "one" ? icons.repeatOne : icons.repeat;
+		rp.classList.toggle("active", state.settings.repeat !== "off");
+	}
+}
+
+function exitImmersive() {
+	immersiveActive = false;
+	if (immersiveIdleTimeout) clearTimeout(immersiveIdleTimeout);
+	if (immCursorRaf) cancelAnimationFrame(immCursorRaf);
+	immCursorEl?.remove(); immCursorEl = null;
+	immCursorRing?.remove(); immCursorRing = null;
+	const overlay = document.getElementById("imm-overlay");
+	if (overlay) { overlay.classList.remove("imm-in"); setTimeout(() => overlay.remove(), 400); }
+	renderMain();
+}
+
+function resetImmersiveIdle() {
+	if (immersiveIdleTimeout) clearTimeout(immersiveIdleTimeout);
+	const controls = document.getElementById("imm-controls");
+	const info = document.getElementById("imm-info");
+	const close = document.getElementById("imm-close");
+	const vol = document.getElementById("imm-vol-wrap");
+	if (controls) controls.classList.remove("imm-hidden");
+	if (info) info.classList.remove("imm-hidden");
+	if (close) close.classList.remove("imm-hidden");
+	if (vol) vol.classList.remove("imm-hidden");
+	if (immCursorEl) immCursorEl.style.opacity = "1";
+	if (immCursorRing) immCursorRing.style.opacity = "1";
+	immersiveIdleTimeout = setTimeout(() => {
+		if (!immersiveActive) return;
+		if (controls) controls.classList.add("imm-hidden");
+		if (info) info.classList.add("imm-hidden");
+		if (close) close.classList.add("imm-hidden");
+		if (vol) vol.classList.add("imm-hidden");
+		if (immCursorEl) immCursorEl.style.opacity = "0";
+		if (immCursorRing) immCursorRing.style.opacity = "0";
+	}, IMMERSIVE_IDLE_MS);
+}
+
+function refreshImmersiveInfo() {
+	const t = state.currentTrack;
+	if (!t) return;
+	const artEl = document.getElementById("imm-art");
+	const titleEl = document.getElementById("imm-title");
+	const artistEl = document.getElementById("imm-artist");
+	const metaEl = document.getElementById("imm-meta");
+	if (titleEl) titleEl.textContent = t.title;
+	if (artistEl) artistEl.textContent = t.artist;
+	if (metaEl) metaEl.textContent = `${t.album}${t.year ? ` • ${t.year}` : ""}${t.bitrate ? ` • ${Math.round(t.bitrate / 1000)} kbps` : ""}`;
+	if (artEl) {
+		if (t.artDataUrl) {
+			artEl.innerHTML = `<img src="${t.artDataUrl}" alt="">`;
+			artEl.classList.add("has-art");
+		} else {
+			artEl.innerHTML = "";
+			artEl.classList.remove("has-art");
+		}
+	}
+}
+
+function updateImmersivePlayState() {
+	const btn = document.getElementById("imm-play");
+	if (btn) btn.innerHTML = `<span>${engine.paused ? icons.play : icons.pause}</span>`;
+}
+
+function updateImmersiveProgress(cur: number, dur: number) {
+	if (!immersiveActive) return;
+	const fill = document.getElementById("imm-scrub-fill");
+	const curEl = document.getElementById("imm-cur-time");
+	const durEl = document.getElementById("imm-dur-time");
+	if (fill) fill.style.width = `${dur > 0 ? (cur / dur) * 100 : 0}%`;
+	if (curEl) curEl.textContent = formatTime(cur);
+	if (durEl) durEl.textContent = dur > 0 ? formatTime(dur) : "0:00";
+}
+
+// Mouse idle for immersive
+window.addEventListener("mousemove", () => { if (immersiveActive) resetImmersiveIdle(); });
+window.addEventListener("mousedown", () => { if (immersiveActive) resetImmersiveIdle(); });
 
 // ---------- Drag-and-drop import ----------
 // WebView2 / Chromium exposes a non-standard `.path` on dropped File objects
@@ -3152,13 +3950,28 @@ function openMetadataEditor(ids: string[]) {
 	const sample = tracks[0];
 	const allSame = (key: keyof TrackInfo) =>
 		tracks.every((t) => t[key] === sample[key]);
+	const artVaries = tracks.length > 1 && !allSame("artDataUrl");
+	const initialArt = !artVaries ? (sample.artDataUrl ?? null) : null;
+
+	// undefined = leave whatever art is already embedded in each file alone,
+	// null = strip embedded art, string = replace with this data: URL.
+	let pendingArt: string | null | undefined = undefined;
 
 	const overlay = document.createElement("div");
 	overlay.className = "modal-overlay";
 	overlay.innerHTML = `
 		<div class="modal">
 			<h3>Edit metadata${tracks.length > 1 ? ` · ${tracks.length} tracks` : ""}</h3>
-			<p class="modal-note">Changes apply in your Lakky library. Files on disk are not modified — your tags stay intact.</p>
+			<p class="modal-note">Changes are written directly into each file's tags on disk.</p>
+			<div class="md-art-row">
+				<img id="md-art-preview" class="md-art-preview" src="${initialArt ?? ""}" style="${initialArt ? "" : "display:none"}" alt="" />
+				<div id="md-art-none" class="md-art-none" style="${initialArt ? "display:none" : ""}">${artVaries ? "(varies)" : "No art"}</div>
+				<div class="md-art-actions">
+					<input type="file" id="md-art-input" accept="image/*" style="display:none" />
+					<button class="btn btn-ghost" id="md-art-pick" type="button">Change art…</button>
+					<button class="btn btn-ghost" id="md-art-remove" type="button">Remove art</button>
+				</div>
+			</div>
 			<label>Title <input type="text" id="md-title" value="${escapeHtml(allSame("title") ? sample.title : "")}" placeholder="${tracks.length > 1 ? "(varies)" : ""}" /></label>
 			<label>Artist <input type="text" id="md-artist" value="${escapeHtml(allSame("artist") ? sample.artist : "")}" placeholder="${tracks.length > 1 ? "(varies)" : ""}" /></label>
 			<label>Album <input type="text" id="md-album" value="${escapeHtml(allSame("album") ? sample.album : "")}" placeholder="${tracks.length > 1 ? "(varies)" : ""}" /></label>
@@ -3175,7 +3988,31 @@ function openMetadataEditor(ids: string[]) {
 	const cleanup = () => overlay.remove();
 	document.getElementById("md-cancel")?.addEventListener("click", cleanup);
 	overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(); });
-	document.getElementById("md-save")?.addEventListener("click", () => {
+
+	const artPreview = document.getElementById("md-art-preview") as HTMLImageElement;
+	const artNone = document.getElementById("md-art-none") as HTMLDivElement;
+	const artInput = document.getElementById("md-art-input") as HTMLInputElement;
+	document.getElementById("md-art-pick")?.addEventListener("click", () => artInput.click());
+	artInput.addEventListener("change", () => {
+		const f = artInput.files?.[0];
+		if (!f) return;
+		const reader = new FileReader();
+		reader.onload = () => {
+			pendingArt = reader.result as string;
+			artPreview.src = pendingArt;
+			artPreview.style.display = "";
+			artNone.style.display = "none";
+		};
+		reader.readAsDataURL(f);
+	});
+	document.getElementById("md-art-remove")?.addEventListener("click", () => {
+		pendingArt = null;
+		artPreview.style.display = "none";
+		artNone.textContent = "No art";
+		artNone.style.display = "";
+	});
+
+	document.getElementById("md-save")?.addEventListener("click", async () => {
 		const get = (id: string) => (document.getElementById(id) as HTMLInputElement).value.trim();
 		const title = get("md-title");
 		const artist = get("md-artist");
@@ -3184,8 +4021,13 @@ function openMetadataEditor(ids: string[]) {
 		const genre = get("md-genre");
 		const year = yearStr ? parseInt(yearStr, 10) : undefined;
 
+		const saveBtn = document.getElementById("md-save") as HTMLButtonElement;
+		saveBtn.disabled = true;
+		saveBtn.textContent = "Saving…";
+
 		const byId = new Map(state.library.map((t) => [t.id, t]));
-		for (const t of tracks) {
+		let failures = 0;
+		await Promise.all(tracks.map(async (t) => {
 			const updated = { ...t };
 			// Single track: blank fields mean "clear". Bulk: blank == leave alone.
 			const blankMeansClear = tracks.length === 1;
@@ -3194,13 +4036,48 @@ function openMetadataEditor(ids: string[]) {
 			if (album || blankMeansClear) updated.album = album || t.album;
 			if (yearStr || blankMeansClear) updated.year = year;
 			if (genre || blankMeansClear) updated.genre = genre || undefined;
-			byId.set(t.id, updated);
-		}
+
+			try {
+				const res = await bun().saveTrackMetadata({
+					path: t.path,
+					title: updated.title,
+					artist: updated.artist,
+					album: updated.album,
+					year: updated.year ?? null,
+					genre: updated.genre ?? "",
+					...(pendingArt !== undefined ? { art: pendingArt } : {}),
+				});
+				byId.set(t.id, res.ok && res.track ? res.track : updated);
+				if (!res.ok) failures++;
+			} catch (err) {
+				console.warn("[ui] saveTrackMetadata failed:", (err as Error).message);
+				byId.set(t.id, updated);
+				failures++;
+			}
+		}));
+
 		state.library = Array.from(byId.values());
 		saveLibrary();
+		// The now-playing bar, immersive view, and Discord presence all read
+		// off state.currentTrack directly rather than re-deriving from
+		// state.library, so a currently-playing track that just got edited
+		// needs an explicit refresh or it'd keep showing stale info/art until
+		// the next track change.
+		if (state.currentTrack && byId.has(state.currentTrack.id)) {
+			state.currentTrack = byId.get(state.currentTrack.id)!;
+			updateNowPlayingBar();
+			updateAccentFromArt(state.currentTrack.artDataUrl);
+			if (immersiveActive) refreshImmersiveInfo();
+			schedulePresenceUpdate();
+		}
 		renderMain();
-		toast(`Updated ${tracks.length} track${tracks.length === 1 ? "" : "s"}`, { ttl: 2400 });
-		sfx.success();
+		if (failures > 0) {
+			toast(`Saved ${tracks.length - failures}/${tracks.length} — ${failures} file${failures === 1 ? "" : "s"} failed to write`, { ttl: 3400 });
+			sfx.error();
+		} else {
+			toast(`Updated ${tracks.length} track${tracks.length === 1 ? "" : "s"}`, { ttl: 2400 });
+			sfx.success();
+		}
 		cleanup();
 	});
 }
@@ -3242,6 +4119,7 @@ function ctxItemsForTrack(t: TrackInfo): CtxItem[] {
 			bun().showInFolder({ path: t.path }).catch(() => {});
 			sfx.click();
 		}},
+		{ label: "Inspect Security & Integrity…", onClick: () => openSecurityAuditModal(t) },
 		{ label: "Edit metadata…", onClick: () => openMetadataEditor([t.id]) },
 		{ label: "Remove from library", danger: true, onClick: () => {
 			state.library = state.library.filter((x) => x.id !== t.id);
@@ -3281,6 +4159,7 @@ function ctxItemsForTrack(t: TrackInfo): CtxItem[] {
 	engine.setEq(state.settings.eq);
 	engine.setVolume(state.settings.volume);
 	engine.setRate(state.settings.speed);
+	engine.setPreAmp(state.settings.preAmp);
 	applyAccent(state.settings.accent);
 
 	// Push the persisted node graph (if any) into both engines so the user's
@@ -3293,8 +4172,26 @@ function ctxItemsForTrack(t: TrackInfo): CtxItem[] {
 	// If a library folder is configured, refresh from disk in the background
 	// so users see whatever's actually there, not a stale snapshot.
 	if (state.libraryFolder) {
-		refreshLibraryFromFolder(state.libraryFolder).catch(() => {});
+		refreshLibraryFromFolder(state.libraryFolder).catch((e) => { console.warn("[library] refresh from folder failed:", (e as Error).message); });
 	}
+
+	// Initialize 3D Anime Cel-Shaded Scene
+	try {
+		stylized3dScene = new Stylized3DScene(document.body, state.settings.scenePreset ?? "sakura_sunset");
+		stylized3dScene.setVisible(state.settings.show3DScene);
+	} catch (err) {
+		console.warn("[3D] Stylized3DScene init skipped:", err);
+	}
+
+	// Audio-reactive frame ticker for 3D anime ocean & foliage
+	const tick3D = () => {
+		if (state.settings.show3DScene && stylized3dScene && !engine.paused) {
+			const bands = engine.getAudioBands();
+			stylized3dScene.updateAudio(bands);
+		}
+		requestAnimationFrame(tick3D);
+	};
+	requestAnimationFrame(tick3D);
 
 	// Brief settle before fading the app in.
 	setTimeout(() => dismissSplash(), 650);

@@ -17,6 +17,9 @@ export type LatestReleaseInfo = {
 	publishedAt: string;
 	installerUrl: string | null;
 	installerName: string | null;
+	installerSize?: number | null;
+	sha256Url?: string | null;
+	expectedSha256?: string | null;
 };
 
 export type TrackInfo = {
@@ -35,6 +38,12 @@ export type TrackInfo = {
 	sampleRate?: number;
 	artDataUrl?: string;
 	size: number;
+	replayGainTrack?: number;
+	replayGainAlbum?: number;
+	securitySafe?: boolean;
+	securityScore?: number;
+	securityThreats?: string[];
+	verifiedFormat?: string | null;
 };
 
 export type DiscordPresence = {
@@ -155,19 +164,14 @@ export type PlayerRPC = {
 				params: {};
 				response: { ok: boolean; url: string | null };
 			};
-			// Renderer publishes its current state so the mini-player and web
-			// remote can show it without the renderer needing to talk to them.
 			publishPlayerState: {
 				params: { state: SharedPlayerState };
 				response: { ok: boolean };
 			};
-			// Mini-player + web remote ask for the snapshot directly.
 			getSharedPlayerState: {
 				params: {};
 				response: { state: SharedPlayerState | null };
 			};
-			// Mini-player / web-remote send playback commands here; main process
-			// forwards them to the renderer via the externalCommand message.
 			dispatchCommand: {
 				params: { action: ExternalCommand; value?: number | string };
 				response: { ok: boolean };
@@ -184,28 +188,50 @@ export type PlayerRPC = {
 				params: {};
 				response: { ok: boolean };
 			};
-			// Polls GitHub releases for `<owner/repo>` and returns the latest
-			// public, non-draft release (or null if the repo has none yet).
-			// Network failures bubble up as a thrown RPC error so the
-			// renderer can show a sensible toast.
 			checkLatestRelease: {
-				params: { repo: string };
+				params: { repo: string; channel?: "stable" | "canary" };
 				response: { release: LatestReleaseInfo | null };
 			};
-			// Download an installer .exe to a temp file. Progress streams back
-			// via the updateDownloadProgress message. Resolves with the local
-			// path once complete.
 			downloadUpdate: {
 				params: { url: string; filename: string };
-				response: { path: string };
+				response: { path: string; sha256: string };
 			};
-			// Spawn the downloaded installer detached with the silent-install
-			// flags and quit the bun process so the installer can replace the
-			// running executable. The installer's [Run] entry brings the new
-			// build back up automatically.
 			runUpdateAndQuit: {
 				params: { path: string };
 				response: { ok: boolean };
+			};
+			toggleAutostart: {
+				params: {};
+				response: { ok: boolean; enabled: boolean };
+			};
+			saveTrackMetadata: {
+				params: {
+					path: string;
+					title: string;
+					artist: string;
+					album: string;
+					year: number | null;
+					genre: string;
+					art?: string | null;
+				};
+				response: { ok: boolean; track?: TrackInfo; error?: string };
+			};
+			scanMediaIntegrity: {
+				params: { path: string };
+				response: {
+					safe: boolean;
+					score: number;
+					threats: string[];
+					mimeDetected: string;
+					sha256: string;
+					verifiedFormat: string | null;
+					isPolyglot: boolean;
+					hasEmbeddedExecutable: boolean;
+				};
+			};
+			setDefaultPlayerAssociations: {
+				params: {};
+				response: { ok: boolean; message: string };
 			};
 		};
 		messages: {};
@@ -217,14 +243,15 @@ export type PlayerRPC = {
 			copyProgress: { done: number; total: number; current: string };
 			discordStatusChanged: { connected: boolean };
 			windowStateChanged: { maximized: boolean; fullscreen: boolean; hidden: boolean };
-			// External controllers (mini-player, web remote) send commands here.
 			externalCommand: { action: ExternalCommand; value?: number | string };
-			// Mini-player asks the main window to push its latest state.
 			requestStatePush: {};
-			// Streaming progress of the installer download. -1 in `total`
-			// means the server didn't send Content-Length so we can't compute
-			// a percentage.
-			updateDownloadProgress: { received: number; total: number };
+			updateDownloadProgress: {
+				received: number;
+				total: number;
+				percent: number;
+				speedBytesPerSec: number;
+				etaSeconds: number;
+			};
 		};
 	}>;
 };
@@ -239,6 +266,28 @@ export type ExternalCommand =
 	| "volume"
 	| "shuffle"
 	| "repeat";
+
+// Strict-enough semver compare. Returns 1 if `a` is newer than `b`,
+// -1 if older, 0 if equal.
+export function compareVersions(a: string, b: string): number {
+	const norm = (v: string) => v.replace(/^v/i, "").trim();
+	const splitCore = (v: string): { core: number[]; pre: string } => {
+		const [core, pre = ""] = norm(v).split(/[-+]/, 2);
+		return { core: core.split(".").map((n) => parseInt(n, 10) || 0), pre };
+	};
+	const A = splitCore(a);
+	const B = splitCore(b);
+	const len = Math.max(A.core.length, B.core.length);
+	for (let i = 0; i < len; i++) {
+		const ai = A.core[i] ?? 0;
+		const bi = B.core[i] ?? 0;
+		if (ai !== bi) return ai > bi ? 1 : -1;
+	}
+	if (A.pre === B.pre) return 0;
+	if (!A.pre) return 1;
+	if (!B.pre) return -1;
+	return A.pre > B.pre ? 1 : -1;
+}
 
 export type SharedPlayerState = {
 	track: {

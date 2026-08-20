@@ -15,11 +15,14 @@
 	},
 	"dependencies": {
 		"electrobun": "^1.18.1",
-		"music-metadata": "^10.6.4"
+		"music-metadata": "^10.6.4",
+		"node-taglib-sharp": "^6.0.3",
+		"three": "^0.185.1"
 	},
 	"devDependencies": {
 		"@tailwindcss/vite": "^4.0.0",
 		"@types/bun": "latest",
+		"@types/three": "^0.185.4",
 		"concurrently": "^9.1.0",
 		"rcedit": "^5.0.2",
 		"sharp": "^0.34.5",

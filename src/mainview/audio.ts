@@ -33,42 +33,32 @@ export class AudioEngine {
 	private source: MediaElementAudioSourceNode | null = null;
 	private filters: BiquadFilterNode[] = [];
 	private gain: GainNode;
-	// Stable downstream tap point. Visualizers attach their own AnalyserNodes
-	// to this so every analyser sees fresh per-frame data instead of
-	// double-smoothed reads. Defaults to ctx.destination when no shared tap
-	// is supplied.
+	private preAmp: GainNode;
 	monitorTap: AudioNode;
 	private cb: AudioEngineEvents = {};
 	private fadeRaf: number | null = null;
 	private graphConnected = false;
-	// When non-null, the user's custom node graph is spliced in where the
-	// 10-band EQ chain normally sits. setEq becomes a no-op in this mode
-	// because the EQ filters are not in the signal path.
 	private nodeGraph: NodeGraph | null = null;
 	private nodeEntry: AudioNode | null = null;
 	private nodeExit: AudioNode | null = null;
-	// Tracks whatever AudioNode is currently feeding `gain`. Without this,
-	// swapping between node graphs (or between graph→EQ chain) leaks: the
-	// previous "middle" stays connected to gain, the new one also connects,
-	// and the analyser ends up seeing a sum of both paths — which presents
-	// as "the visualizer goes crazy after I touched the node editor".
 	private feedingGain: AudioNode | null = null;
 	private trackCount = 0;
-	private trackTimes: number[] = []; // wall-clock ms when each play started, for stats
+	private trackTimes: number[] = [];
+	private abLoop: { a: number; b: number } | null = null;
+	private monoMerge: ChannelMergerNode | null = null;
+	private _mono = false;
 
-	// When a shared `monitorTap` is provided, every engine routes through it
-	// instead of straight to ctx.destination. Visualizers can then build their
-	// own AnalyserNodes off that single tap — engine swaps, crossfades, and
-	// audio↔video transitions all stay live without any rebuild of the visual
-	// path. When no tap is provided we just send to ctx.destination directly.
 	constructor(media: HTMLMediaElement, sharedCtx?: AudioContext, monitorTap?: AudioNode) {
 		this.media = media;
 		this.media.crossOrigin = "anonymous";
 		this.ctx =
-			sharedCtx ?? new (window.AudioContext || window.webkitAudioContext!)();
+			sharedCtx ?? new window.AudioContext();
 
 		this.gain = this.ctx.createGain();
 		this.gain.gain.value = 1;
+		this.preAmp = this.ctx.createGain();
+		this.preAmp.gain.value = 1;
+		this.preAmp.connect(this.gain);
 		this.monitorTap = monitorTap ?? this.ctx.destination;
 
 		for (const f of EQ_BANDS) {
@@ -83,7 +73,15 @@ export class AudioEngine {
 		}
 
 		this.media.addEventListener("timeupdate", () => {
-			this.cb.onTimeUpdate?.(this.media.currentTime, this.media.duration || 0);
+			const cur = this.media.currentTime;
+			const dur = this.media.duration || 0;
+			this.cb.onTimeUpdate?.(cur, dur);
+			// AB repeat check
+			if (this.abLoop && this.abLoop.a < this.abLoop.b && dur > 0) {
+				if (cur >= this.abLoop.b) {
+					this.media.currentTime = this.abLoop.a;
+				}
+			}
 		});
 		this.media.addEventListener("ended", () => this.cb.onEnded?.());
 		this.media.addEventListener("play", () => this.cb.onPlay?.());
@@ -102,126 +100,103 @@ export class AudioEngine {
 		this.graphConnected = true;
 	}
 
-	// Wire the section between `source` and `gain` according to the current
-	// mode (custom node graph if set, otherwise the default 10-band EQ chain).
-	// Safe to call repeatedly — it disconnects whatever was there first.
 	private wireMiddle() {
 		if (!this.source) return;
-		// 1) Explicitly disconnect whatever was previously feeding `gain`.
-		//    This is the critical bit: a prior `nodeExit` (from an older
-		//    compiled graph) still has a live connection to `gain` and would
-		//    keep summing in unless we drop it here.
 		if (this.feedingGain) {
-			try { this.feedingGain.disconnect(this.gain); } catch {}
+			try { this.feedingGain.disconnect(this.preAmp); } catch {}
 			this.feedingGain = null;
 		}
-		// 2) Detach source from everything and clear the EQ chain so the new
-		//    wiring starts from a clean slate.
 		try { this.source.disconnect(); } catch {}
-		for (const f of this.filters) {
-			try { f.disconnect(); } catch {}
-		}
-		// 3) If there's a previous graph's exit still hanging around with
-		//    incoming connections, kill them all too (the graph's internal
-		//    wiring otherwise keeps it alive and routing).
-		if (this.nodeExit) {
-			try { this.nodeExit.disconnect(); } catch {}
-		}
+		for (const f of this.filters) { try { f.disconnect(); } catch {} }
+		if (this.nodeExit) { try { this.nodeExit.disconnect(); } catch {} }
+		if (this.monoMerge) { try { this.monoMerge.disconnect(); } catch {} }
+
+		const tail = this.monoMerge ?? this.preAmp;
 
 		if (this.nodeGraph && this.nodeEntry && this.nodeExit) {
 			this.source.connect(this.nodeEntry);
-			this.nodeExit.connect(this.gain);
+			this.nodeExit.connect(tail);
 			this.feedingGain = this.nodeExit;
 		} else {
 			let node: AudioNode = this.source;
-			for (const f of this.filters) {
-				node.connect(f);
-				node = f;
-			}
-			node.connect(this.gain);
+			for (const f of this.filters) { node.connect(f); node = f; }
+			node.connect(tail);
 			this.feedingGain = node;
 		}
 	}
 
-	on(events: AudioEngineEvents) {
-		this.cb = { ...this.cb, ...events };
-	}
+	on(events: AudioEngineEvents) { this.cb = { ...this.cb, ...events }; }
+	clearListeners() { this.cb = {}; }
 
-	// Used when this engine is no longer the primary — prevents stale handlers
-	// (e.g. the outgoing engine's onTimeUpdate) from clobbering the UI.
-	clearListeners() {
-		this.cb = {};
-	}
-
-	// Update the 10-band EQ gains. When a custom node graph is active the EQ
-	// chain is not in the signal path, so this becomes a stored-but-inert
-	// update — values are still applied to the filter nodes (so they're
-	// correct if/when we revert) but nothing about the audio changes until
-	// setNodeGraph(null) restores the default chain.
 	setEq(values: number[]) {
 		values.forEach((v, i) => {
-			if (this.filters[i]) {
-				this.filters[i].gain.value = Math.max(-24, Math.min(24, v));
-			}
+			if (this.filters[i]) this.filters[i].gain.value = Math.max(-24, Math.min(24, v));
 		});
 	}
 
-	// Splice a user-built node graph into the signal path in place of the
-	// 10-band EQ. Pass null to revert to the default EQ chain. The gain and
-	// analyser nodes (and the destination) stay where they are — the graph
-	// only replaces the middle section between `source` and `gain`.
 	setNodeGraph(graph: NodeGraph | null) {
 		this.nodeGraph = graph;
 		if (graph) {
 			const { entry, exit } = compileGraph(graph, this.ctx);
-			this.nodeEntry = entry;
-			this.nodeExit = exit;
-		} else {
-			this.nodeEntry = null;
-			this.nodeExit = null;
-		}
-		// Only rewire if the source already exists. If the graph hasn't been
-		// connected yet (no track played), ensureGraph() will pick up the
-		// new nodeGraph state on its first call.
+			this.nodeEntry = entry; this.nodeExit = exit;
+		} else { this.nodeEntry = null; this.nodeExit = null; }
 		if (this.graphConnected) this.wireMiddle();
 	}
 
 	setVolume(v: number) {
 		this.gain.gain.cancelScheduledValues(this.ctx.currentTime);
-		this.gain.gain.linearRampToValueAtTime(
-			Math.max(0, Math.min(1, v)),
-			this.ctx.currentTime + 0.02,
-		);
+		this.gain.gain.linearRampToValueAtTime(Math.max(0, Math.min(1, v)), this.ctx.currentTime + 0.02);
 	}
 
-	// playbackRate maps directly. preservesPitch (default true in Chromium) keeps
-	// the music in key at non-1× speeds — important for audiobooks/podcasts.
+	setPreAmp(db: number) {
+		this.preAmp.gain.value = Math.pow(10, Math.max(-12, Math.min(12, db)) / 20);
+	}
+
+	setMono(on: boolean) {
+		this._mono = on;
+		if (on && !this.monoMerge && this.source) {
+			const splitter = this.ctx.createChannelSplitter(2);
+			this.monoMerge = this.ctx.createChannelMerger(1);
+			splitter.connect(this.monoMerge, 0);
+			splitter.connect(this.monoMerge, 1);
+			try { this.source.disconnect(splitter); } catch {}
+			this.source.connect(splitter);
+			this.wireMiddle();
+		}
+	}
+
+	setABLoop(loop: { a: number; b: number } | null) { this.abLoop = loop; }
+
+	async setSinkId(deviceId: string) {
+		if ("setSinkId" in this.media) {
+			try { await (this.media as any).setSinkId(deviceId); } catch (e) {
+				console.warn("[audio] setSinkId failed:", (e as Error).message);
+			}
+		}
+	}
+
 	setRate(r: number) {
 		const v = Math.max(0.25, Math.min(4, r));
 		this.media.playbackRate = v;
-		try {
-			(this.media as any).preservesPitch = true;
-			(this.media as any).webkitPreservesPitch = true;
-		} catch {}
+		try { (this.media as any).preservesPitch = true; } catch {}
 	}
 
 	async loadAndPlay(track: TrackInfo) {
-		// Chromium intensively throttles WebView2 when the window is minimized.
-		// The AudioContext can be in "suspended" or "interrupted" the moment we
-		// swap media.src — without a resume here the new track plays silently
-		// until the user re-focuses. Cover both non-"running" states.
 		if (this.ctx.state !== "running") {
-			try { await this.ctx.resume(); } catch {}
+			try { await this.ctx.resume(); } catch (err) {
+				console.warn("[audio] AudioContext resume failed (pre-play):", (err as Error).message);
+			}
 		}
+		this.monoMerge = null;
 		this.ensureGraph();
+		if (this._mono) this.setMono(true);
 		this.media.src = track.streamUrl;
 		try {
 			await this.media.play();
-			// Some browsers transition the context to suspended *during* the
-			// play() call when the page is hidden. One more nudge after play
-			// is cheap insurance.
 			if (this.ctx.state !== "running") {
-				try { await this.ctx.resume(); } catch {}
+				try { await this.ctx.resume(); } catch (err) {
+					console.warn("[audio] AudioContext resume failed (post-play):", (err as Error).message);
+				}
 			}
 			this.trackCount++;
 			this.trackTimes.push(Date.now());
@@ -233,34 +208,20 @@ export class AudioEngine {
 	togglePlay() {
 		if (this.media.paused) {
 			this.media.play().catch((err) => this.cb.onError?.(err.message));
-		} else {
-			this.media.pause();
-		}
+		} else { this.media.pause(); }
 	}
 
-	pause() {
-		this.media.pause();
-	}
+	pause() { this.media.pause(); }
 
 	play() {
-		this.media.play().catch(() => {});
+		this.media.play().catch((err) => this.cb.onError?.(`Play failed: ${err.message}`));
 	}
 
-	seek(time: number) {
-		if (Number.isFinite(time)) this.media.currentTime = time;
-	}
+	seek(time: number) { if (Number.isFinite(time)) this.media.currentTime = time; }
 
-	get currentTime() {
-		return this.media.currentTime;
-	}
-
-	get duration() {
-		return this.media.duration || 0;
-	}
-
-	get paused() {
-		return this.media.paused;
-	}
+	get currentTime() { return this.media.currentTime; }
+	get duration() { return this.media.duration || 0; }
+	get paused() { return this.media.paused; }
 
 	fadeOut(durationMs: number, then?: () => void) {
 		const start = this.gain.gain.value;
@@ -269,16 +230,57 @@ export class AudioEngine {
 			const p = Math.min(1, (performance.now() - t0) / durationMs);
 			this.gain.gain.value = start * (1 - p);
 			if (p < 1) this.fadeRaf = requestAnimationFrame(tick);
-			else {
-				this.media.pause();
-				this.gain.gain.value = start;
-				then?.();
-			}
+			else { this.media.pause(); this.gain.gain.value = start; then?.(); }
 		};
 		this.fadeRaf = requestAnimationFrame(tick);
 	}
 
-	getTrackPlayCount() {
-		return this.trackCount;
+	private sharedAnalyser: AnalyserNode | null = null;
+	private freqBuffer: Uint8Array | null = null;
+
+	getAudioBands(): { bass: number; mid: number; treble: number; energy: number } {
+		if (!this.sharedAnalyser) {
+			try {
+				this.sharedAnalyser = this.ctx.createAnalyser();
+				this.sharedAnalyser.fftSize = 512;
+				this.sharedAnalyser.smoothingTimeConstant = 0.8;
+				this.monitorTap.connect(this.sharedAnalyser);
+				this.freqBuffer = new Uint8Array(this.sharedAnalyser.frequencyBinCount);
+			} catch {
+				return { bass: 0, mid: 0, treble: 0, energy: 0 };
+			}
+		}
+		if (!this.freqBuffer || !this.sharedAnalyser) return { bass: 0, mid: 0, treble: 0, energy: 0 };
+		this.sharedAnalyser.getByteFrequencyData(this.freqBuffer as unknown as Uint8Array<ArrayBuffer>);
+
+		const len = this.freqBuffer.length;
+		let bassSum = 0, bassCount = 0;
+		let midSum = 0, midCount = 0;
+		let trebleSum = 0, trebleCount = 0;
+		let totalSum = 0;
+
+		for (let i = 0; i < len; i++) {
+			const v = this.freqBuffer[i] / 255;
+			totalSum += v;
+			if (i < len * 0.15) {
+				bassSum += v;
+				bassCount++;
+			} else if (i < len * 0.6) {
+				midSum += v;
+				midCount++;
+			} else {
+				trebleSum += v;
+				trebleCount++;
+			}
+		}
+
+		return {
+			bass: bassCount > 0 ? bassSum / bassCount : 0,
+			mid: midCount > 0 ? midSum / midCount : 0,
+			treble: trebleCount > 0 ? trebleSum / trebleCount : 0,
+			energy: totalSum / len,
+		};
 	}
+
+	getTrackPlayCount() { return this.trackCount; }
 }

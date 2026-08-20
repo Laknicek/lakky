@@ -29,6 +29,8 @@ import {
 	classifyFile,
 	copyIntoLibrary,
 	walkMedia,
+	sanitizeSegment,
+	writeTrackMetadata,
 } from "./library";
 import { startMediaServer } from "./mediaServer";
 import { onDiscordStatus, setDiscordPresence } from "./discord";
@@ -36,6 +38,9 @@ import { readM3U, writeM3U } from "./m3u";
 import { startWebRemote, stopWebRemote } from "./webRemote";
 import { appDataDir, LAKKY_APP_DATA } from "./paths";
 import { fetchLatestRelease, downloadInstaller, spawnInstallerAndQuit } from "./updater";
+import { fetchLyrics } from "./lyrics";
+import { scanMediaFile } from "./security";
+import { registerDefaultPlayerAssociations } from "./systemIntegration";
 
 const DEV_SERVER_PORT = 5173;
 const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
@@ -48,10 +53,10 @@ async function getMainViewUrl(): Promise<string> {
 			console.log(`HMR enabled: Using Vite dev server at ${DEV_SERVER_URL}`);
 			return DEV_SERVER_URL;
 		} catch {
-			console.log(
-				"Vite dev server not running. Run 'bun run dev:hmr' for HMR support.",
-			);
-		}
+		console.log(
+			"Vite dev server not running. Run 'bun run dev:hmr' for HMR support.",
+		);
+	}
 	}
 	return "views://mainview/index.html";
 }
@@ -93,7 +98,8 @@ function loadAll(): Record<string, unknown> {
 	try {
 		if (!existsSync(path)) return {};
 		return JSON.parse(readFileSync(path, "utf8"));
-	} catch {
+	} catch (err) {
+		console.warn("[state] load failed, resetting to defaults:", (err as Error).message);
 		return {};
 	}
 }
@@ -167,7 +173,7 @@ let webRemoteUrl: string | null = null;
 function broadcastCommand(action: ExternalCommand, value?: number | string) {
 	try {
 		mainWindow.webview.rpc?.send.externalCommand({ action, value });
-	} catch {}
+	} catch (e) { console.warn("[rpc] broadcastCommand failed:", (e as Error).message); }
 }
 
 // Each BrowserWindow needs its own RPC instance (the transport binds to the
@@ -272,16 +278,16 @@ function makePlayerRPC() {
 				return { ok: true };
 			},
 
-			checkLatestRelease: async ({ repo }) => {
-				const release = await fetchLatestRelease(repo);
+			checkLatestRelease: async ({ repo, channel }) => {
+				const release = await fetchLatestRelease(repo, channel);
 				return { release };
 			},
 
 			downloadUpdate: async ({ url, filename }) => {
-				const path = await downloadInstaller(url, filename, (received, total) => {
-					mainWindow.webview.rpc?.send.updateDownloadProgress({ received, total });
+				const { path, sha256 } = await downloadInstaller(url, filename, (prog) => {
+					mainWindow.webview.rpc?.send.updateDownloadProgress(prog);
 				});
-				return { path };
+				return { path, sha256 };
 			},
 
 			runUpdateAndQuit: ({ path }) => {
@@ -305,7 +311,8 @@ function makePlayerRPC() {
 			openExternal: ({ url }) => {
 				try {
 					return { ok: Utils.openExternal(url) };
-				} catch {
+				} catch (e) {
+					console.warn("[rpc] openExternal failed:", (e as Error).message);
 					return { ok: false };
 				}
 			},
@@ -314,7 +321,8 @@ function makePlayerRPC() {
 				try {
 					Utils.showItemInFolder(path);
 					return { ok: true };
-				} catch {
+				} catch (e) {
+					console.warn("[rpc] showInFolder failed:", (e as Error).message);
 					return { ok: false };
 				}
 			},
@@ -323,7 +331,8 @@ function makePlayerRPC() {
 				try {
 					Utils.showNotification({ title, body });
 					return { ok: true };
-				} catch {
+				} catch (e) {
+					console.warn("[rpc] notify failed:", (e as Error).message);
 					return { ok: false };
 				}
 			},
@@ -341,8 +350,16 @@ function makePlayerRPC() {
 			},
 
 			windowMinimize: () => {
-				try { mainWindow.minimize(); return { ok: true }; }
-				catch { return { ok: false }; }
+				// A real OS-level minimize (SW_MINIMIZE) puts WebView2 into a
+				// throttled state that survives our occlusion/backgrounding
+				// flags: if a track changes while minimized this way, the new
+				// track's audio session never spins up and stays silent until
+				// the window is restored. hideMainWindow() uses the exact same
+				// hide path as "send to tray" / the mini-player, which doesn't
+				// trigger that throttling — so audio keeps working normally.
+				// The tray icon (bare click or "Show Lakky") brings it back.
+				try { hideMainWindow(); return { ok: true }; }
+				catch (e) { console.warn("[rpc] windowMinimize failed:", (e as Error).message); return { ok: false }; }
 			},
 
 			windowMaximizeToggle: () => {
@@ -351,19 +368,17 @@ function makePlayerRPC() {
 					if (isMax) mainWindow.unmaximize();
 					else mainWindow.maximize();
 					return { ok: true, maximized: !isMax };
-				} catch {
-					return { ok: false, maximized: false };
-				}
+				} catch (e) { console.warn("[rpc] windowMaximizeToggle failed:", (e as Error).message); return { ok: false, maximized: false }; }
 			},
 
 			windowClose: () => {
 				try { mainWindow.close(); return { ok: true }; }
-				catch { return { ok: false }; }
+				catch (e) { console.warn("[rpc] windowClose failed:", (e as Error).message); return { ok: false }; }
 			},
 
 			windowIsMaximized: () => {
 				try { return { maximized: mainWindow.isMaximized() }; }
-				catch { return { maximized: false }; }
+				catch (e) { console.warn("[rpc] windowIsMaximized failed:", (e as Error).message); return { maximized: false }; }
 			},
 
 			windowToggleFullscreen: async () => {
@@ -371,13 +386,13 @@ function makePlayerRPC() {
 				// on this platform doesn't actually flip the state, fall back to
 				// a maximize toggle so the button always *does* something.
 				let isFs = false;
-				try { isFs = mainWindow.isFullScreen(); } catch {}
-				try { mainWindow.setFullScreen(!isFs); } catch {}
+				try { isFs = mainWindow.isFullScreen(); } catch (e) { console.warn("[rpc] isFullScreen failed:", (e as Error).message); }
+				try { mainWindow.setFullScreen(!isFs); } catch (e) { console.warn("[rpc] setFullScreen failed:", (e as Error).message); }
 
 				await new Promise((r) => setTimeout(r, 80));
 
 				let nowFs = false;
-				try { nowFs = mainWindow.isFullScreen(); } catch {}
+				try { nowFs = mainWindow.isFullScreen(); } catch (e) { console.warn("[rpc] isFullScreen (verify) failed:", (e as Error).message); }
 
 				if (nowFs === isFs) {
 					// setFullScreen was a no-op — fall back to maximize.
@@ -386,7 +401,8 @@ function makePlayerRPC() {
 						if (isMax) mainWindow.unmaximize();
 						else mainWindow.maximize();
 						return { ok: true, fullscreen: !isMax };
-					} catch {
+					} catch (e) {
+						console.warn("[rpc] windowToggleFullscreen fallback maximize failed:", (e as Error).message);
 						return { ok: false, fullscreen: false };
 					}
 				}
@@ -399,7 +415,8 @@ function makePlayerRPC() {
 					if (!target) return { x: 0, y: 0 };
 					const p = target.getPosition();
 					return { x: p.x | 0, y: p.y | 0 };
-				} catch {
+				} catch (e) {
+					console.warn("[rpc] windowGetPosition failed:", (e as Error).message);
 					return { x: 0, y: 0 };
 				}
 			},
@@ -410,7 +427,8 @@ function makePlayerRPC() {
 					if (!target) return { ok: false };
 					target.setPosition(x | 0, y | 0);
 					return { ok: true };
-				} catch {
+				} catch (e) {
+					console.warn("[rpc] windowSetPosition failed:", (e as Error).message);
 					return { ok: false };
 				}
 			},
@@ -456,7 +474,7 @@ function makePlayerRPC() {
 			closeMiniPlayer: () => {
 				// Closing the mini fires its 'close' handler above, which
 				// re-shows the main window.
-				try { miniWindow?.close(); } catch {}
+				try { miniWindow?.close(); } catch (e) { console.warn("[mini] close failed:", (e as Error).message); }
 				miniWindow = null;
 				showMainWindow();
 				return { ok: true };
@@ -507,6 +525,24 @@ function makePlayerRPC() {
 					}
 				}
 				return { tracks: out };
+			},
+
+			saveTrackMetadata: async ({ path, title, artist, album, year, genre, art }) => {
+				try {
+					const track = await writeTrackMetadata(path, streamBase, { title, artist, album, year, genre, art });
+					return { ok: true, track };
+				} catch (err) {
+					console.warn("[library] saveTrackMetadata failed:", path, (err as Error).message);
+					return { ok: false, error: (err as Error).message };
+				}
+			},
+
+			scanMediaIntegrity: async ({ path }) => {
+				return await scanMediaFile(path);
+			},
+
+			setDefaultPlayerAssociations: async () => {
+				return await registerDefaultPlayerAssociations();
 			},
 
 			importPlaylist: async () => {
@@ -575,6 +611,25 @@ function makePlayerRPC() {
 				return { ok: true, url: r.url };
 			},
 
+			toggleAutostart: () => {
+				const startupDir = process.platform === "win32"
+					? join(process.env.APPDATA ?? "", "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+					: join(process.env.HOME ?? "", ".config", "autostart");
+				const linkPath = join(startupDir, process.platform === "win32" ? "Lakky.bat" : "lakky.desktop");
+				if (existsSync(linkPath)) {
+					try { require("node:fs").unlinkSync(linkPath); return { ok: true, enabled: false }; } catch { return { ok: false, enabled: true }; }
+				}
+				try {
+					if (!existsSync(startupDir)) mkdirSync(startupDir, { recursive: true });
+					const exe = process.execPath;
+					const script = process.platform === "win32" ? `@echo off\r\nstart "" "${exe}"` : `[Desktop Entry]\nType=Application\nExec=${exe}\nName=Lakky\n`;
+					writeFileSync(linkPath, script);
+					return { ok: true, enabled: true };
+				} catch {
+					return { ok: false, enabled: false };
+				}
+			},
+
 			publishPlayerState: ({ state }) => {
 				// Mini-player and web remote poll getSharedPlayerState — keeping
 				// this dead-simple instead of doing a fanout.
@@ -604,6 +659,15 @@ const url = await getMainViewUrl();
 // 1480 × 860 is a comfortable default that gives the library grid two extra
 // columns and the equalizer enough breathing room, while still fitting on
 // a 1440p screen with the taskbar visible. Users can resize freely.
+// Centre on the primary monitor.
+let winX = 100, winY = 60;
+try {
+	const { screen } = await import("electron");
+	const primary = screen.getPrimaryDisplay();
+	const { width, height } = primary.workAreaSize;
+	winX = Math.max(0, Math.round((width - 1480) / 2));
+	winY = Math.max(0, Math.round((height - 860) / 2));
+} catch {}
 mainWindow = new BrowserWindow({
 	title: "Lakky",
 	url,
@@ -612,8 +676,8 @@ mainWindow = new BrowserWindow({
 	frame: {
 		width: 1480,
 		height: 860,
-		x: 100,
-		y: 60,
+		x: winX,
+		y: winY,
 	},
 });
 
@@ -642,7 +706,7 @@ function showMainWindow() {
 			mainWindowHidden = false;
 			notifyVisibility();
 		}
-	} catch {}
+	} catch (e) { console.warn("[main] showMainWindow failed:", (e as Error).message); }
 }
 function hideMainWindow() {
 	try {
@@ -651,7 +715,7 @@ function hideMainWindow() {
 			mainWindowHidden = true;
 			notifyVisibility();
 		}
-	} catch {}
+	} catch (e) { console.warn("[main] hideMainWindow failed:", (e as Error).message); }
 }
 
 let trayPlaying = false; // tracks last-known state for tooltip label
@@ -724,7 +788,7 @@ const trayPollTimer = setInterval(() => {
 // Make sure the tray vanishes on app shutdown.
 process.on("beforeExit", () => {
 	clearInterval(trayPollTimer);
-	try { tray.remove(); } catch {}
+	try { tray.remove(); } catch (e) { console.warn("[main] tray.remove failed:", (e as Error).message); }
 });
 
 console.log("Lakky ready.");

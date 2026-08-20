@@ -1,141 +1,255 @@
-# LAK Player
+# Lakky Player
 
-A fast, modern desktop media player built on **Electrobun + Bun**. It plays just about any audio or video file you throw at it, with a stack of features inspired by the most-loved Spotify mods.
+<p align="center">
+  <img src="assets/icon-source.jpg" alt="Lakky Player Banner" width="180" style="border-radius: 28px; box-shadow: 0 20px 50px rgba(0,0,0,0.6);" />
+</p>
 
-## Features
+<p align="center">
+  <strong>Next-Generation Desktop Media Player with 2026 Anime Cel-Shaded 3D Visuals & WebAudio DSP Engine</strong>
+</p>
 
-### Core playback
-- Plays nearly any audio or video file the OS webview supports (`mp3`, `flac`, `m4a`, `wav`, `ogg`, `opus`, `mp4`, `mkv`, `webm`, `mov`, `avi`, `wmv`, and more — universal extension allow-list under `src/bun/library.ts`)
-- Range-streamed from a local Bun HTTP server, so seek/scrub is instant on huge files
-- 10-band parametric equalizer with presets (Flat, Bass Boost, Treble Boost, Vocal, Lo-Fi, Electronic, Classical, Loudness)
-- Web Audio API graph: `<audio>`/`<video>` → 10x BiquadFilter → Gain → Analyser → output
-- Smooth fade-out on sleep timer
+<p align="center">
+  <a href="https://github.com/Laknicek/lakky/releases"><img src="https://img.shields.io/badge/version-1.0.3-a78bfa.svg?style=for-the-badge&logo=github" alt="Version 1.0.3" /></a>
+  <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun_1.3-fbf0df.svg?style=for-the-badge&logo=bun&logoColor=black" alt="Bun 1.3" /></a>
+  <a href="https://blackboard.sh/electrobun"><img src="https://img.shields.io/badge/framework-Electrobun_1.18-22d3ee.svg?style=for-the-badge" alt="Electrobun" /></a>
+  <a href="https://tailwindcss.com"><img src="https://img.shields.io/badge/styling-Tailwind_v4-38bdf8.svg?style=for-the-badge&logo=tailwindcss" alt="Tailwind CSS v4" /></a>
+  <a href="https://threejs.org"><img src="https://img.shields.io/badge/3D_Engine-Three.js_WebGL-black.svg?style=for-the-badge&logo=three.js" alt="Three.js" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-emerald.svg?style=for-the-badge" alt="License MIT" /></a>
+</p>
 
-### UI / UX
-- Glassmorphic dark UI with animated gradient backdrop
-- Welcome / loading screen with floating orbs + animated logo
-- Album-art-driven accent color: the ambient glow shifts to match each track's cover
-- Vinyl-spin animation on the now-playing art
-- Spectrum visualizer (canvas + AnalyserNode) on the Now Playing view
-- Hover micro-interactions: card lift, glow follow, button scale
-- Synthesized UI sound effects via Web Audio API (click, hover, play, pause, skip, toggle, success, error)
-- Soft toast notifications
+---
 
-### Spotify-mod inspired features
-- **True shuffle / shuffle toggle** persisted across sessions
-- **Repeat off / all / one** (with the classic "1" overlay)
-- **Sleep timer** (5/10/15/30/45/60/90/120 min, with gentle 3-second fade-out)
-- **Crossfade slider** in settings (UI; gapless fader hook ready)
-- **Equalizer presets** (8 built-in + Custom)
-- **Most-played** section on Home, driven by per-track play counts
-- **Playlists** (create, persist, play)
-- **Queue side panel** with click-to-jump
-- **Search** across title / artist / album
-- **Hotkeys**: Space (play/pause), ←/→ (±5s), Ctrl+←/→ (prev/next), ↑/↓ (volume)
-- **Discord Rich Presence** with paused/playing icon, elapsed-time bar, track + album text
+## What is Lakky?
 
-### Library folder
-- Settings → **Library folder**: pick a drive/folder once
-- Every file you import is copied there, organized as `Artist / Album / Title.ext`
-- Files already inside the library folder are referenced in place (no duplicate copy)
-- Same-named files with different content get an auto-incrementing suffix (`Song (2).mp3`)
-- "Open in Explorer" button to jump straight to the folder
+**Lakky Player** is a modern, lightweight desktop media player built for speed, sound quality, and visual atmosphere. Built on **Electrobun** (native OS webview shell) and **Bun** (high-throughput JavaScript runtime), Lakky delivers instant startup and smooth playback with low memory usage.
 
-### Native integration
-- Native open-file / open-folder dialogs (Electrobun's `Utils.openFileDialog`)
-- Native notifications via Electrobun's `Utils.showNotification`
-- Persistent settings, library, playlists, and play-stats stored as JSON in the app data dir
-- **Custom frameless titlebar** with logo + minimize/maximize/close buttons (Windows-style hover, red-on-close)
-- **Native window controls** wired through Electrobun RPC: minimize, maximize-toggle, close, fullscreen
-- **Windows SMTC integration** via the Media Session API — track info appears in the media flyout, hardware media keys (▶ ⏸ ⏮ ⏭) and headphone buttons control playback
-- **Taskbar icon** generated procedurally from `assets/icon.ico` and embedded into the launcher via the `postBuild` script
-- **16:9 aspect ratio** initial window (1280×720) that fits cleanly on a 1080p screen
+Under the hood, Lakky combines real-time **WebAudio DSP effect graphs**, deep **Binary Anti-Malware / Polyglot integrity inspection**, and a GPU-accelerated **2026 Anime Cel-Shaded 3D environment** inspired by modern anime shaders (Genshin, Makoto Shinkai, Studio Ghibli, and Christian Ortiz's `stylized-components`).
 
-## Quick start
+Whether you are listening to high-res FLAC files, watching 4K MKV anime, experimenting with 8D spatial sound, or enjoying reactive 3D ocean waves and cherry blossoms in sync with your beats, Lakky is built to be the best everyday desktop media player.
 
-```sh
+---
+
+## 3D Anime Cel-Shaded Audio-Reactive World
+
+Lakky features a real-time 3D stylized WebGL environment running directly in the background or during Now Playing playback:
+
+```
++-------------------------------------------------------------------------+
+| [3D Cel-Shaded Skybox & Sun/Moon Aura]                                  |
+|                                                                         |
+|            ( ( Floating Sakura Petals & Embers ) )                      |
+|                                                                         |
+|      /\_/\_      [Stylized Ghibli Trees & Fluffy Foliage]    /\_/\_     |
+|     /       \            /|  /|  /|                         /       \   |
+|    / Islands \          / | / | / |                        / Islands \  |
+| ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ |
+| ~~~~~~~~~ [3-Tier Cel-Shaded Gerstner Ocean with Foam Crests] ~~~~~~~~~ |
+| ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ |
++-------------------------------------------------------------------------+
+```
+
+### Custom GLSL Shaders & Physics
+- **Cel-Shaded Ocean & Water**: Multi-layer Gerstner waves with stepped color bands (from deep indigo to shallow turquoise cyan), procedural caustics, and crisp manga specular glints. Bass kicks physically displace wave heights in real time.
+- **Fluffy Anime Trees & Foliage**: Normal-mapped dodecahedron clusters creating soft Ghibli-style leaf clumps with wind vertex displacement. Mid frequencies drive tree sway and leaf cadence.
+- **Sakura Petal Physics**: Procedural particle simulation with curl-noise flutter, turbulence, and gravity resets. Treble transients make celestial particles and fireflies burst.
+- **4 Curated 2026 Scene Presets**:
+  1. **Sakura Sunset**: Cherry blossom grove overlooking glowing pink/lavender sunset waters.
+  2. **Ocean Shinkai**: Deep Makoto Shinkai midnight ocean beneath starlight and radiant ripples.
+  3. **Cyber Lake**: Neon cyan and hot magenta cybernetic waters reflecting modern Tokyo nights.
+  4. **Ghibli Forest**: Daylight emerald meadow with crystalline stream and floating particles.
+
+---
+
+## Built-In Binary Anti-Malware & Polyglot Armor
+
+Media players often execute untrusted files downloaded from the web. Lakky includes a built-in **Zero-Trust File Integrity Engine** (`src/bun/security.ts`) that runs on every ingested file before decoding or streaming:
+
+```
+  Incoming Media File
+          │
+          ▼
+┌───────────────────────────────────────────────────────────┐
+│ 1. Magic Header vs Extension Inspection                   │
+│    Detects disguised .exe, .scr, .bat, .ps1, .vbs, .lnk,  │
+│    .cpl, .dll, .pif, .elf, .macho renamed to .mp3/.mp4    │
+└─────────────────────────┬─────────────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────────────┐
+│ 2. Polyglot & Steganography Signature Scanner             │
+│    Scans ID3v2 padding, MP4 atoms (moov/mdat), and RIFF   │
+│    chunks for hidden PE stubs (MZ/PE) or ZIP polyglots   │
+└─────────────────────────┬─────────────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────────────┐
+│ 3. Shannon Entropy & Obfuscation Analysis                 │
+│    Detects anomalous packed shellcode in non-media chunks │
+└─────────────────────────┬─────────────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────────────┐
+│ 4. Metadata Sanitizer & XSS Defenses                      │
+│    Neutralizes path traversal, null bytes, HTML scripts,  │
+│    and dangerous control codes in tags & lyrics           │
+└─────────────────────────┬─────────────────────────────────┘
+                          │
+                          ▼
+             [Safe Stream & Badge Assigned]
+```
+
+- **In-App Security Badges**: Clean tracks display a green `Verified Safe` shield. Files with header mismatches or embedded anomalies display a caution/alert badge with an interactive audit modal.
+- **1-Click Library Audit**: Run a full security and integrity check across your entire music collection at any time.
+
+---
+
+## Infinite Format & Codec Support
+
+Lakky supports a vast catalog of audio and video containers without external plugins:
+
+| Category | Supported Extensions & Formats |
+| :--- | :--- |
+| **Lossless & Hi-Res Audio** | `.flac`, `.wav`, `.wave`, `.aiff`, `.aif`, `.alac`, `.ape` (Monkey's Audio), `.wv` (WavPack), `.dsd`, `.dsf`, `.dff`, `.tak`, `.tta`, `.caf` |
+| **Standard & Compressed Audio** | `.mp3`, `.m4a`, `.aac`, `.opus`, `.ogg`, `.oga`, `.wma`, `.mka`, `.mp2`, `.mp1`, `.amr`, `.ac3`, `.dts`, `.eac3`, `.spx`, `.ra`, `.au`, `.snd` |
+| **Tracker & Synthesizer Formats** | `.mid`, `.midi`, `.mod`, `.xm`, `.s3m`, `.it` |
+| **Video Containers** | `.mp4`, `.m4v`, `.mkv` (Matroska), `.webm`, `.mov`, `.avi`, `.wmv`, `.flv`, `.f4v`, `.mpg`, `.mpeg`, `.m2v`, `.3gp`, `.3g2`, `.ts`, `.mts`, `.m2ts`, `.ogv`, `.vob`, `.rm`, `.rmvb`, `.asf`, `.divx`, `.wtv`, `.dvr-ms` |
+
+### 1-Click Windows Default Player Setup
+Set Lakky as your default media player for all 60+ audio and video file formats in Windows with a single button in Settings. Lakky also registers the `lakky://` protocol for opening and playing links.
+
+---
+
+## 8D Spatial Audio & Modular DSP Node Graph
+
+Beyond the standard 10-band equalizer, Lakky features a full visual **Audio Node Graph Editor**:
+
+- **8D Binaural Rotating Soundstage**: Simulates sound moving smoothly around your head with HRTF curve modeling and distance Doppler shifts.
+- **Anime Lo-Fi Tape Saturator**: Warms up digital tracks with gentle harmonic saturation, tape wow/flutter, and subtle vinyl dust.
+- **Crystal Vocal Enhancer**: Multi-band exciter tuned for clarity in anime OSTs, J-Pop vocals, and dialogue.
+- **Dynamic Bass Exciter**: Psychoacoustic sub-harmonic generator for deep punch without distortion.
+- **Concert Hall Reverb**: Algorithmic reverb engine with procedural impulse response decay convolution.
+- **Compressor, Filters & Parametric EQ**: Studio-grade dynamic range compressor, lowpass, highpass, bandpass, notch, and peaking filters.
+
+---
+
+## Seamless In-App Auto-Updater
+
+- **Automatic Background Checks**: Checks GitHub releases against your current version.
+- **Stable & Canary Release Channels**: Switch between stable production releases and early canary builds.
+- **In-App Progress & Telemetry**: Live download bar with transfer speed (MB/s), estimated time remaining (ETA), and bytes received.
+- **SHA-256 Verification**: Computes the SHA-256 hash of the downloaded installer to confirm integrity before running.
+- **One-Click Restart**: Installs silently (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`) and relaunches the app smoothly.
+
+---
+
+## 2026 Cel-Shaded Anime Themes
+
+Choose from 9 custom color themes built with Tailwind v4 and CSS variables:
+
+- **Sakura Sunset**: Pastel pink, cherry blossom rose, warm amber, and lilac mist.
+- **Cyber NeoTokyo**: Electric cyan, hot magenta, deep obsidian, and neon purple.
+- **Ghibli Emerald**: Lush meadow green, forest emerald, sky blue, and cream gold.
+- **Ocean Shinkai**: Deep Makoto Shinkai indigo, azure waves, and starry cyan.
+- **Midnight Shogun**: Dark ink, crimson glow, gold leaf, and smoked slate.
+- **Midnight**: Deep violet, cyan electric highlights.
+- **Aurora**: Cyan and teal gradient glow.
+- **Solar**: Warm orange and crimson sunrise.
+- **Rose**: Hot pink and magenta neon.
+- **Dynamic Art Matching**: Automatically extracts the dominant accent color from current album artwork.
+
+---
+
+## Synced Karaoke Lyrics, Mobile Remote & Discord RPC
+
+- **Synced Karaoke Lyrics**: Millisecond-accurate word/line highlighting with automatic LRCLIB matching and offline disk cache.
+- **Mobile Web Remote PWA**: Control playback, seek, change volume, and view album art from your phone or tablet on your local Wi-Fi with QR code pairing.
+- **Discord Rich Presence**: Native raw IPC pipe integration displaying your currently playing track, elapsed time, and high-res artwork.
+- **A-B Loop Repeat**: Loop any segment of a song with single-key triggers (`B`).
+- **Lakky Echoes**: Fullscreen year-in-review visual experience with stats, top tracks, and genre breakdowns.
+
+---
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+| :--- | :--- |
+| `Space` | Play / Pause |
+| `Ctrl + Right` / `Ctrl + Left` | Next / Previous Track |
+| `Right` / `Left` | Seek Forward / Backward (5s) |
+| `Up` / `Down` | Volume Up / Down (5%) |
+| `M` | Toggle Mute |
+| `S` | Toggle Shuffle |
+| `R` | Cycle Repeat Mode (Off / All / One) |
+| `B` | Set A-B Loop Points / Clear Loop |
+| `F` / `F11` | Toggle Fullscreen |
+| `Ctrl + K` / `Ctrl + F` | Focus Library Search |
+| `1` - `8` | Switch Main Views (Home, Library, Now Playing, EQ, Playlists, Stats, Nodes, Settings) |
+| `Esc` | Close Modals / Exit Fullscreen |
+
+---
+
+## Building from Source
+
+### Prerequisites
+- [Bun](https://bun.sh) (v1.3.0 or higher)
+- Windows 10/11, macOS, or Linux
+
+### Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/Laknicek/lakky.git
+cd lakky
+
+# Install dependencies
 bun install
-bun run start          # production build of the renderer + launch Electrobun
-# or
-bun run dev:hmr        # Vite HMR + Electrobun watch
-```
 
-## Discord Rich Presence
+# Run Vite dev server with Hot Module Replacement (HMR)
+bun run dev:hmr
 
-LAK Player uses the Discord application id **`1505585532179054744`** by default. Just open the Discord application's developer portal at <https://discord.com/developers/applications/1505585532179054744/rich-presence/assets> and upload these images under **Rich Presence → Art Assets**:
-
-| Key          | Used as     | Recommended size | Purpose                                            |
-| ------------ | ----------- | ---------------- | -------------------------------------------------- |
-| `lak_logo`   | Large image | 1024×1024 PNG    | The big tile shown next to the activity            |
-| `play`      | Small image | 512×512 PNG      | Overlay shown while a track is playing             |
-| `pause`     | Small image | 512×512 PNG      | Overlay shown while playback is paused             |
-
-Asset keys must be lowercase and match exactly. After upload, Discord can take up to ~10 minutes to propagate the assets. Until then the *text* fields (track / artist / album / elapsed-time bar) still appear — the images just won't.
-
-LAK Player talks the Discord IPC protocol directly (it does **not** depend on the `discord-rpc` npm package, which hangs under Bun on Windows). Set `LAK_DISCORD_DEBUG=1` to see every IPC frame in the console — useful if something looks off:
-
-```sh
-LAK_DISCORD_DEBUG=1 bun run start
-```
-
-You can also run a one-shot diagnostic that connects, posts a test activity, and exits:
-
-```sh
-bun scripts/test-discord.ts
-```
-
-To use your own Discord application instead, set:
-
-```sh
-LAK_DISCORD_CLIENT_ID=<your_client_id> bun run start
-```
-
-The Discord desktop client must be running locally for the IPC handshake. The **Discord rich presence** toggle in Settings turns RPC on/off.
-
-## Project layout
-
-```
-electrobun.config.ts        # Electrobun app config (id, build options, icon, postBuild)
-vite.config.ts              # Vite config (Tailwind + renderer entry)
-assets/
-  logo.svg                  # In-app LAK logo (SVG)
-  icon.ico                  # Windows taskbar / .exe icon (multi-size)
-  icon-256.png              # PNG fallback for Linux
-scripts/
-  make-icon.ts              # Procedurally renders the logo and writes assets/icon.ico
-  embed-icon.ts             # Stamps assets/icon.ico into the built launcher.exe
-src/
-  shared/rpcSchema.ts       # Shared RPC types between main and renderer
-  bun/                      # Main process (Bun)
-    index.ts                # BrowserWindow, RPC handlers, Discord wiring, window ctrl
-    library.ts              # Metadata extraction, folder walk, id<->path map
-    mediaServer.ts          # Local Bun.serve range-streaming server
-    discord.ts              # discord-rpc client with auto-reconnect (client id baked in)
-  mainview/                 # Renderer
-    index.html              # Custom titlebar + splash + app mount
-    main.ts                 # App entry: state, views, transport, hotkeys, MediaSession
-    audio.ts                # AudioEngine with Web Audio EQ + analyser
-    visualizer.ts           # Canvas spectrum visualizer (bars + strip modes)
-    sfx.ts                  # Synthesized UI SFX
-    logo.ts                 # Inline SVG logo for splash, titlebar, sidebar
-    style.css               # Tailwind + custom CSS, frameless titlebar styles
-```
-
-## Building a distributable
-
-```sh
+# Build production executable
 bun run build
 ```
 
-Electrobun produces a self-extracting bundle in `build/`. See [Electrobun docs](https://blackboard.sh/electrobun/docs/) for cross-platform packaging.
+The output binaries and installer scripts are generated in `build/` and `installer/`.
 
-## Tech stack
+---
 
-- **Electrobun 1.18** — fast desktop runtime with system webview + Bun main process
-- **Bun 1.3** — runtime, package manager, HTTP server for media streaming
-- **Tailwind CSS 4** — utility CSS layered over a custom theme
-- **Vite 6** — renderer bundler
-- **music-metadata** — ID3 / Vorbis / FLAC / MP4 tag extraction
-- **discord-rpc** — Discord IPC client
-- **Web Audio API** — EQ, gain, analyser, and synthesized SFX
-- **TypeScript** everywhere
+## Architecture Overview
+
+```
+lakky/
+├── src/
+│   ├── bun/                    # Backend Process (Bun Runtime)
+│   │   ├── index.ts            # Main process entrypoint & window management
+│   │   ├── security.ts         # Binary integrity & anti-malware scanner
+│   │   ├── systemIntegration.ts# Windows default player & file associations
+│   │   ├── library.ts          # Media scanner, metadata parsing & art cache
+│   │   ├── updater.ts          # Auto-updater with SHA-256 verification
+│   │   ├── mediaServer.ts      # Local zero-copy range streaming server
+│   │   ├── discord.ts          # Raw IPC pipe Discord Rich Presence
+│   │   ├── webRemote.ts        # Mobile LAN web remote HTTP server
+│   │   └── lyrics.ts           # Synced lyrics fetcher & parser
+│   ├── mainview/               # Frontend UI Viewport
+│   │   ├── main.ts             # Primary UI controller, router & player state
+│   │   ├── stylized3d.ts       # Three.js 3D Anime Cel-Shaded Scene Engine
+│   │   ├── visualizer.ts       # 2D canvas FFT spectrum & waveform visualizer
+│   │   ├── audio.ts            # WebAudio AudioEngine with crossfade & pre-amp
+│   │   ├── nodes.ts            # Modular DSP audio effect graph compiler
+│   │   ├── nodeEditor.ts       # Interactive node graph drag-and-drop editor
+│   │   ├── nodeTemplates.ts    # Curated DSP presets (8D, Lo-Fi, Reverb)
+│   │   ├── echoes.ts           # Year-in-review visual timeline
+│   │   ├── sfx.ts              # Synthesized WebAudio UI soundscapes
+│   │   └── style.css           # 2026 Anime Cel-Shaded themes & Tailwind v4
+│   └── shared/
+│       └── rpcSchema.ts        # Type-safe RPC contracts between Bun and Webview
+├── electrobun.config.ts        # Desktop window & build configuration
+├── package.json
+└── tsconfig.json
+```
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE). Built with Electrobun, Bun, Three.js, and Tailwind CSS.

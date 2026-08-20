@@ -7,6 +7,7 @@ import {
 	NODE_DEFS,
 	newGraph,
 	validateGraph,
+	uid,
 	type NodeGraph,
 	type GraphNode,
 	type GraphEdge,
@@ -29,7 +30,7 @@ function getToast(): ToastFn {
 	return _toast;
 }
 
-function uid(prefix = "n"): string {
+function makeUid(prefix = "n"): string {
 	return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 

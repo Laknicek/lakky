@@ -1,11 +1,8 @@
-// Cover-art lookup for Discord rich presence. Because Discord can't fetch
-// from local files or 127.0.0.1, we resolve a public HTTPS URL per album
-// via iTunes Search (no API key required) and **persist** the result to
-// disk so each album is only ever looked up once. After a few listening
-// sessions your library is fully cached and lookups effectively stop.
-//
-// The cache survives restarts; misses are cached too so we don't keep
-// hitting iTunes for albums it doesn't know about.
+// Cover-art lookup for Discord rich presence. Discord can't fetch from
+// local files or 127.0.0.1, so we resolve a public HTTPS URL per album via
+// iTunes Search (no API key required) and persist the result to disk — each
+// album is looked up once. The cache survives restarts; misses are cached too
+// so we don't keep hitting iTunes for albums it doesn't know about.
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -19,7 +16,6 @@ function cachePath(): string {
 
 let cache: Map<string, CacheEntry> | null = null;
 const inflight = new Map<string, Promise<string | null>>();
-let allowNetwork = true;
 
 function loadCache(): Map<string, CacheEntry> {
 	if (cache) return cache;
@@ -27,8 +23,10 @@ function loadCache(): Map<string, CacheEntry> {
 	const p = cachePath();
 	try {
 		if (existsSync(p)) {
-			const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, CacheEntry>;
-			for (const [k, v] of Object.entries(raw)) cache.set(k, v);
+			const raw = JSON.parse(readFileSync(p, "utf8"));
+			if (raw && typeof raw === "object") {
+				for (const [k, v] of Object.entries(raw as Record<string, CacheEntry>)) cache.set(k, v);
+			}
 		}
 	} catch (err) {
 		console.warn("[cover-cache] read failed:", (err as Error).message);
@@ -54,21 +52,14 @@ function saveCacheSoon() {
 	}, 1000);
 }
 
-/** Set whether new (uncached) artist/album combos are allowed to hit iTunes.
- *  When false, only previously-cached entries are returned; everything else
- *  comes back as null and the caller falls back to lak_logo. */
-export function setCoverArtNetworkAllowed(on: boolean) {
-	allowNetwork = on;
-}
-
 function normaliseKey(artist: string, album: string): string {
 	return `${artist.toLowerCase().trim()}::${album.toLowerCase().trim()}`;
 }
 
 function cleanForSearch(s: string): string {
 	return s
-		.replace(/[‘’]/g, "'")
-		.replace(/[“”]/g, '"')
+		.replace(/[\u2018\u2019]/g, "'")
+		.replace(/[\u201C\u201D]/g, '"')
 		.replace(/[\(\[][^)\]]*[)\]]/g, " ")
 		.replace(/\s*\b(feat|ft|featuring)\.?\b[^&,;-]*$/i, " ")
 		.replace(/\s+-\s+(single|ep|remixes|deluxe|live)$/i, " ")
@@ -90,12 +81,14 @@ async function searchITunes(term: string): Promise<string | null> {
 			signal: AbortSignal.timeout(4500),
 		});
 		if (!res.ok) return null;
-		const json = (await res.json()) as { results?: Array<{ artworkUrl100?: string }> };
-		for (const r of json.results ?? []) {
-			if (r.artworkUrl100) return bumpResolution(r.artworkUrl100);
+		const json = await res.json();
+		if (!json || typeof json !== "object" || !Array.isArray((json as any).results)) return null;
+		for (const r of (json as any).results) {
+			if (r && typeof r.artworkUrl100 === "string") return bumpResolution(r.artworkUrl100);
 		}
 		return null;
-	} catch {
+	} catch (err) {
+		console.warn("[cover-art] iTunes search failed:", (err as Error).message);
 		return null;
 	}
 }
@@ -112,11 +105,6 @@ export async function findCoverArtUrl(
 	const hit = c.get(key);
 	if (hit) return hit.url;
 
-	if (!allowNetwork) {
-		// Offline mode: don't look up, don't cache a miss either (so the next
-		// time the user re-enables online it can try this album).
-		return null;
-	}
 	const existing = inflight.get(key);
 	if (existing) return existing;
 

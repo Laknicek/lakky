@@ -2,6 +2,7 @@ import "./style.css";
 import Electrobun, { Electroview } from "electrobun/view";
 import type { PlayerRPC, ExternalCommand } from "../shared/rpcSchema";
 import { installTooltips } from "./tooltip";
+import { installWindowDrag } from "./drag";
 
 const rpc = Electroview.defineRPC<PlayerRPC>({
 	maxRequestTime: 5000,
@@ -86,13 +87,13 @@ async function refresh() {
 		$("mini-shuffle").setAttribute("title", s.shuffle ? "Shuffle on" : "Shuffle off");
 		$("mini-repeat").setAttribute("title", s.repeat === "one" ? "Repeat one track" : s.repeat === "all" ? "Repeat queue" : "Repeat off");
 		$("mini-repeat").innerHTML = s.repeat === "one" ? repeatOneIcon : repeatIcon;
-	} catch {
-		// renderer hasn't published yet — try again next tick
+	} catch (e) {
+		console.warn("[mini] getSharedPlayerState failed:", (e as Error).message);
 	}
 }
 
 function dispatch(action: ExternalCommand, value?: number | string) {
-	bun().dispatchCommand({ action, value }).catch(() => {});
+	bun().dispatchCommand({ action, value }).catch((e) => { console.warn("[mini] dispatchCommand failed:", (e as Error).message); });
 }
 
 $("mini-prev").addEventListener("click", () => dispatch("previous"));
@@ -133,8 +134,8 @@ $("mini-eq").addEventListener("click", async () => {
 // Send-to-tray: close mini first so the main window doesn't pop back up,
 // then hide everything to the system tray.
 $("mini-tray").addEventListener("click", async () => {
-	try { await bun().closeMiniPlayer({}); } catch {}
-	try { await bun().sendToTray({}); } catch {}
+	try { await bun().closeMiniPlayer({}); } catch (e) { console.warn("[mini] close (tray) failed:", (e as Error).message); }
+	try { await bun().sendToTray({}); } catch (e) { console.warn("[mini] sendToTray failed:", (e as Error).message); }
 });
 
 // Manual window-drag for the frameless titlebar. WebView2 doesn't honor

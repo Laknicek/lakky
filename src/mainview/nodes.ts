@@ -169,7 +169,7 @@ export type NodeGraph = {
 
 // ---------- helpers ----------
 
-function uid(prefix = "n"): string {
+export function uid(prefix = "n"): string {
 	return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 

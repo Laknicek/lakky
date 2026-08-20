@@ -1,17 +1,14 @@
-import { readdir, stat, mkdir, copyFile, writeFile } from "node:fs/promises";
+import { readdir, stat, mkdir, copyFile, writeFile, unlink } from "node:fs/promises";
 import { join, extname, basename, dirname, sep, normalize } from "node:path";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { parseFile } from "music-metadata";
+import { File as TagFile, Picture, ByteVector, PictureType } from "node-taglib-sharp";
 import type { TrackInfo, MediaKind } from "../shared/rpcSchema";
 import { appDataDir, LAKKY_APP_DATA } from "./paths";
+import { scanMediaFile, sanitizeMetadata } from "./security";
 
 // ---------- Cover-art cache on disk ----------
-// Each cover is written to <appData>/Lakky/art/<id>.<ext> and only the URL
-// lives in state.json. Inlining art as base64 would bloat state.json past
-// disk-readable size on a large library; on-disk storage keeps state.json
-// small and lets every track keep its art instead of capping at N covers.
-
 let _artDirCache: string | null = null;
 export function artCacheDir(): string {
 	if (_artDirCache) return _artDirCache;
@@ -33,7 +30,7 @@ function extForMime(mime: string): string {
 	return ART_EXT_BY_MIME[m] ?? "jpg";
 }
 
-const ART_EXTS = ["jpg", "png", "webp", "gif", "bmp"];
+const ART_EXTS = ["jpg", "jpeg", "png", "webp", "gif", "bmp"];
 
 function existingArtFile(id: string): string | null {
 	const dir = artCacheDir();
@@ -66,16 +63,19 @@ async function cacheArt(
 	}
 }
 
-const AUDIO_EXTS = new Set([
-	".mp3", ".wav", ".flac", ".ogg", ".oga", ".m4a", ".aac",
-	".wma", ".opus", ".aiff", ".aif", ".alac", ".ape", ".wv",
-	".mka", ".mp2", ".amr", ".ac3", ".dts",
+export const AUDIO_EXTS = new Set([
+	".mp3", ".wav", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".aac",
+	".wma", ".aiff", ".aif", ".alac", ".ape", ".wv", ".mka", ".mp2",
+	".mp1", ".amr", ".ac3", ".dts", ".eac3", ".dsd", ".dsf", ".dff",
+	".au", ".snd", ".ra", ".mid", ".midi", ".mod", ".xm", ".s3m",
+	".it", ".spx", ".tak", ".tta", ".caf",
 ]);
 
-const VIDEO_EXTS = new Set([
-	".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".wmv",
-	".flv", ".f4v", ".mpg", ".mpeg", ".3gp", ".3g2", ".ts",
-	".mts", ".m2ts", ".ogv", ".vob", ".rm", ".rmvb",
+export const VIDEO_EXTS = new Set([
+	".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".wmv", ".flv",
+	".f4v", ".mpg", ".mpeg", ".m2v", ".3gp", ".3g2", ".ts", ".mts",
+	".m2ts", ".ogv", ".vob", ".rm", ".rmvb", ".asf", ".divx", ".wtv",
+	".dvr-ms",
 ]);
 
 export function classifyFile(path: string): MediaKind | null {
@@ -85,16 +85,26 @@ export function classifyFile(path: string): MediaKind | null {
 	return null;
 }
 
-export function isMediaFile(path: string): boolean {
+function isMediaFile(path: string): boolean {
 	return classifyFile(path) !== null;
 }
 
-// Deterministic ID derived from the (normalized) file path. The same file on
-// disk always yields the same ID across launches — which is what lets the
-// renderer persist its library and the queue keep working after a restart.
 export function pathToId(path: string): string {
 	const normalized = normalize(path).toLowerCase();
 	return "t" + createHash("sha1").update(normalized).digest("hex").slice(0, 14);
+}
+
+// Drop any cached art for `id` so a subsequent buildTrackInfo() re-extracts
+async function clearArtCache(id: string): Promise<void> {
+	const dir = artCacheDir();
+	for (const ext of ART_EXTS) {
+		const p = join(dir, `${id}.${ext}`);
+		if (existsSync(p)) {
+			try { await unlink(p); } catch (err) {
+				console.warn("[art] cache clear failed:", p, (err as Error).message);
+			}
+		}
+	}
 }
 
 export async function* walkMedia(root: string): AsyncGenerator<string> {
@@ -104,7 +114,8 @@ export async function* walkMedia(root: string): AsyncGenerator<string> {
 		let entries: import("node:fs").Dirent[];
 		try {
 			entries = await readdir(dir, { withFileTypes: true });
-		} catch {
+		} catch (err) {
+			console.warn("[library] cannot read directory, skipping:", dir, (err as Error).message);
 			continue;
 		}
 		for (const entry of entries) {
@@ -119,9 +130,9 @@ export async function* walkMedia(root: string): AsyncGenerator<string> {
 	}
 }
 
-function sanitizeSegment(s: string): string {
+export function sanitizeSegment(s: string): string {
 	const cleaned = s
-		.replace(/[\/\\:*?"<>|]/g, "_")
+		.replace(/[\/\\:*?"<>|\0]/g, "_")
 		.replace(/\s+/g, " ")
 		.replace(/\.+$/g, "")
 		.trim();
@@ -130,9 +141,6 @@ function sanitizeSegment(s: string): string {
 
 /**
  * Copy a media file into `libraryFolder/Artist/Album/Title.ext`.
- * Returns the destination path. If the destination already exists with the
- * same size, the existing copy is reused. If the source is already inside the
- * library folder, the source path is returned as-is.
  */
 export async function copyIntoLibrary(
 	srcPath: string,
@@ -190,7 +198,7 @@ export async function buildTrackInfo(
 	const baseName = basename(filePath, extname(filePath));
 	const id = pathToId(filePath);
 
-	let title = baseName;
+	let title = sanitizeMetadata(baseName);
 	let artist = "Unknown Artist";
 	let album = "Unknown Album";
 	let duration = 0;
@@ -200,9 +208,13 @@ export async function buildTrackInfo(
 	let bitrate: number | undefined;
 	let sampleRate: number | undefined;
 	let artDataUrl: string | undefined;
+	let replayGainTrack: number | undefined;
+	let replayGainAlbum: number | undefined;
 
-	// Fast path: if we've already cached this track's art on a previous scan,
-	// reuse the file without re-parsing the audio at all for the art portion.
+	// 1. Anti-Malware / Binary Security Scan
+	const secReport = await scanMediaFile(filePath);
+
+	// Fast path for cached art
 	const cachedFilename = existingArtFile(id);
 	if (cachedFilename) {
 		artDataUrl = `${streamBase}/art/${cachedFilename}`;
@@ -210,17 +222,28 @@ export async function buildTrackInfo(
 
 	try {
 		const md = await parseFile(filePath, { duration: true });
-		title = md.common.title ?? title;
-		artist = md.common.artist ?? md.common.albumartist ?? artist;
-		album = md.common.album ?? album;
+		if (md.common.title) title = sanitizeMetadata(md.common.title);
+		if (md.common.artist || md.common.albumartist) {
+			artist = sanitizeMetadata(md.common.artist ?? md.common.albumartist ?? "Unknown Artist");
+		}
+		if (md.common.album) album = sanitizeMetadata(md.common.album);
 		duration = md.format.duration ?? 0;
 		year = md.common.year;
-		genre = md.common.genre?.[0];
+		if (md.common.genre?.[0]) genre = sanitizeMetadata(md.common.genre[0]);
 		trackNumber = md.common.track?.no ?? undefined;
 		bitrate = md.format.bitrate;
 		sampleRate = md.format.sampleRate;
-		// Always extract art when present — no per-scan cutoff. Heavy art is
-		// written to the disk cache rather than carried inline.
+
+		// ReplayGain tags
+		const rgTrack = (md as any).native?.vorbis?.["REPLAYGAIN_TRACK_GAIN"]
+			?? (md as any).native?.id3v2?.find((f: any) => f.id === "TXXX" && f.value?.description === "REPLAYGAIN_TRACK_GAIN")?.value?.data;
+		const rgAlbum = (md as any).native?.vorbis?.["REPLAYGAIN_ALBUM_GAIN"]
+			?? (md as any).native?.id3v2?.find((f: any) => f.id === "TXXX" && f.value?.description === "REPLAYGAIN_ALBUM_GAIN")?.value?.data;
+		if (typeof rgTrack === "string") replayGainTrack = parseFloat(rgTrack.split(" ")[0]);
+		else if (typeof rgTrack === "number") replayGainTrack = rgTrack;
+		if (typeof rgAlbum === "string") replayGainAlbum = parseFloat(rgAlbum.split(" ")[0]);
+		else if (typeof rgAlbum === "number") replayGainAlbum = rgAlbum;
+
 		if (!cachedFilename && md.common.picture && md.common.picture.length > 0) {
 			const pic = md.common.picture[0];
 			const filename = await cacheArt(id, {
@@ -231,15 +254,13 @@ export async function buildTrackInfo(
 				artDataUrl = `${streamBase}/art/${filename}`;
 			}
 		}
-	} catch {
-		// metadata parse failed — fall back to filename
+	} catch (err) {
+		console.warn("[library] metadata parse failed, using fallback filename:", filePath, (err as Error).message);
 	}
 
 	return {
 		id,
 		path: filePath,
-		// Put the path directly in the URL so the media server is stateless.
-		// 127.0.0.1-only binding means there's no third-party exposure here.
 		streamUrl: `${streamBase}/stream?p=${encodeURIComponent(filePath)}`,
 		kind,
 		title,
@@ -253,5 +274,63 @@ export async function buildTrackInfo(
 		sampleRate,
 		artDataUrl,
 		size: stats.size,
+		replayGainTrack,
+		replayGainAlbum,
+		securitySafe: secReport.safe,
+		securityScore: secReport.score,
+		securityThreats: secReport.threats,
+		verifiedFormat: secReport.verifiedFormat,
 	};
+}
+
+function parseDataUrl(dataUrl: string): { mime: string; data: Uint8Array } | null {
+	const m = /^data:([^;,]+);base64,([\s\S]*)$/.exec(dataUrl);
+	if (!m) return null;
+	return { mime: m[1], data: new Uint8Array(Buffer.from(m[2], "base64")) };
+}
+
+export type MetadataFields = {
+	title: string;
+	artist: string;
+	album: string;
+	year: number | null;
+	genre: string;
+	art?: string | null;
+};
+
+/**
+ * Writes tags directly into the audio file on disk and returns updated TrackInfo.
+ */
+export async function writeTrackMetadata(
+	filePath: string,
+	streamBase: string,
+	fields: MetadataFields,
+): Promise<TrackInfo> {
+	const file = TagFile.createFromPath(filePath);
+	try {
+		const tag = file.tag;
+		tag.title = sanitizeMetadata(fields.title);
+		tag.performers = fields.artist ? [sanitizeMetadata(fields.artist)] : [];
+		tag.album = sanitizeMetadata(fields.album);
+		tag.year = fields.year ?? 0;
+		tag.genres = fields.genre ? [sanitizeMetadata(fields.genre)] : [];
+		if (fields.art === null) {
+			tag.pictures = [];
+		} else if (fields.art) {
+			const parsed = parseDataUrl(fields.art);
+			if (parsed) {
+				tag.pictures = [
+					Picture.fromFullData(ByteVector.fromByteArray(parsed.data), PictureType.FrontCover, parsed.mime, "Cover"),
+				];
+			}
+		}
+		file.save();
+	} finally {
+		file.dispose();
+	}
+
+	if (fields.art !== undefined) {
+		await clearArtCache(pathToId(filePath));
+	}
+	return buildTrackInfo(filePath, streamBase);
 }

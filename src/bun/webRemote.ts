@@ -1,6 +1,6 @@
-// Tiny LAN web remote. Spins up a Bun.serve HTTP server with two endpoints
-// plus an in-page WebSocket so a phone on the same network can drive
-// playback. HTTP-only (LAN) to avoid the self-signed-cert UX disaster.
+// LAN web remote. HTTP-only to avoid the self-signed-cert UX nightmare.
+// Serves a self-contained HTML page so a phone on the same network can drive
+// playback. Polls /state every 250ms, sends commands via /cmd POST.
 
 import { networkInterfaces } from "node:os";
 import type { ExternalCommand, SharedPlayerState } from "../shared/rpcSchema";
@@ -151,8 +151,12 @@ export function startWebRemote(port: number, hooks: Hooks): { url: string } | nu
 				}
 				if (url.pathname === "/cmd" && req.method === "POST") {
 					try {
-						const body = (await req.json()) as { action: ExternalCommand; value?: number | string };
-						hooks.dispatch(body.action, body.value);
+						const raw = await req.json();
+						if (!raw || typeof raw !== "object" || typeof (raw as any).action !== "string") {
+							return new Response("invalid action", { status: 400, headers: { "Access-Control-Allow-Origin": "*" } });
+						}
+						const body = raw as { action: string; value?: number | string };
+						hooks.dispatch(body.action as ExternalCommand, body.value);
 						return new Response("ok", {
 							headers: { "Access-Control-Allow-Origin": "*" },
 						});

@@ -6,7 +6,7 @@ let enabled = true;
 
 function ensureCtx(): AudioContext {
 	if (!ctx) {
-		ctx = new (window.AudioContext || window.webkitAudioContext!)();
+		ctx = new window.AudioContext();
 		masterGain = ctx.createGain();
 		masterGain.gain.value = 0.18;
 		masterGain.connect(ctx.destination);

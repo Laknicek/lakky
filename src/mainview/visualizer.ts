@@ -1,15 +1,17 @@
-export type VizMode = "bars" | "strip";
+type VizMode = "bars" | "strip";
 export type VizStyle = "bars" | "wave" | "radial" | "mirror";
 
 export class Visualizer {
 	private canvas: HTMLCanvasElement;
 	private ctx2d: CanvasRenderingContext2D;
+	private source: AudioNode;
 	private analyser: AnalyserNode;
 	private data: Uint8Array;
 	private timeData: Uint8Array;
 	private style: VizStyle = "bars";
 	private peaks: Float32Array | null = null;
 	private smoothed: Float32Array | null = null;
+	private raw: Float32Array | null = null;
 	private running = false;
 	private raf: number | null = null;
 	private dpr = window.devicePixelRatio || 1;
@@ -39,6 +41,7 @@ export class Visualizer {
 		this.ctx2d = canvas.getContext("2d", { alpha: true })!;
 		// 2048 bins → ~21.5 Hz per bin at 44.1 kHz. Enough resolution to
 		// separate sub-bass / bass / low-mids without adding visible latency.
+		this.source = source;
 		this.analyser = source.context.createAnalyser();
 		this.analyser.fftSize = 2048;
 		this.analyser.smoothingTimeConstant = 0.72;
@@ -78,6 +81,11 @@ export class Visualizer {
 		this.stop();
 		window.removeEventListener("resize", this.resizeHandler);
 		this.resizeObserver.disconnect();
+		// Disconnect from the source too, not just the analyser's (nonexistent)
+		// outputs — otherwise the shared monitorTap keeps a live reference to
+		// every analyser ever created, one per Visualizer instantiated over
+		// the session (every view navigation makes a new one).
+		try { this.source.disconnect(this.analyser); } catch {}
 		try { this.analyser.disconnect(); } catch {}
 	}
 
@@ -141,6 +149,7 @@ export class Visualizer {
 			this.barCount = bars;
 			this.peaks = new Float32Array(bars);
 			this.smoothed = new Float32Array(bars);
+			this.raw = new Float32Array(bars);
 		}
 	}
 
@@ -238,8 +247,7 @@ export class Visualizer {
 		this.ensureBuffers(bars);
 		const peaks = this.peaks!;
 		const smoothed = this.smoothed!;
-
-		const raw = new Float32Array(bars);
+		const raw = this.raw!;
 		this.fillBuckets(bars, raw);
 
 		// Per-bar gain: heavy bass boost on the first ~30% of bars (rolling
@@ -309,11 +317,11 @@ export class Visualizer {
 		// the pulse keeps the same cadence no matter what fps cap is set.
 		const phase = (t / 1000) * 2.4;
 		for (let i = 0; i < bars; i++) {
-			const t = i / bars;
+			const frac = i / bars;
 			const wave =
 				0.5 +
-				0.34 * Math.sin(phase + t * 5.2) +
-				0.18 * Math.sin(phase * 0.7 + t * 11);
+				0.34 * Math.sin(phase + frac * 5.2) +
+				0.18 * Math.sin(phase * 0.7 + frac * 11);
 			const v = Math.max(0.06, Math.min(0.42, wave * 0.18 + 0.12));
 			smoothed[i] = smoothed[i] * 0.85 + v * 0.15;
 			peaks[i] = smoothed[i];
