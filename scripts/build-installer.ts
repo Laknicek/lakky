@@ -638,20 +638,34 @@ namespace LakkyInstaller
 }
 `;
 
-const csFile = join(ROOT, "build", "Installer.cs");
-writeFileSync(csFile, installerCs.trim(), "utf-8");
+// 10. Compile official Inno Setup installer
+console.log("[build-installer] 8. Compiling official Inno Setup installer with ISCC...");
+const isccPaths = [
+	"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe",
+	"C:\\Program Files\\Inno Setup 6\\ISCC.exe",
+];
+const iscc = isccPaths.find((p) => existsSync(p));
 
-// 11. Compile C# standalone installer
-console.log("[build-installer] 9. Compiling standalone Windows Installer with native csc.exe...");
-const outExe = join(ARTIFACTS_DIR, "Lakky-Setup.exe");
 const namedExe = join(ARTIFACTS_DIR, `Lakky-v${VERSION}-Setup.exe`);
-const cscPath = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
+const outExe = join(ARTIFACTS_DIR, "Lakky-Setup.exe");
 
-const cmd = `"${cscPath}" /target:winexe /win32icon:"${ICON_PATH}" /resource:"${payloadZip}",payload.zip /out:"${outExe}" /platform:x64 /optimize+ /reference:System.IO.Compression.dll,System.IO.Compression.FileSystem.dll,Microsoft.CSharp.dll,System.Drawing.dll,System.Windows.Forms.dll "${csFile}"`;
+if (iscc) {
+	const issFile = join(ROOT, "installer", "lakky.iss");
+	execSync(`"${iscc}" "${issFile}"`, { stdio: "inherit" });
+	if (existsSync(namedExe)) {
+		cpSync(namedExe, outExe, { force: true });
+	}
+	console.log(`[build-installer] ✓ Official Inno Setup built: ${namedExe}`);
+	console.log(`[build-installer] ✓ Copied to: ${outExe}`);
+} else {
+	console.warn("[build-installer] Inno Setup not found. Falling back to native csc compiler...");
+	const csFile = join(ROOT, "build", "Installer.cs");
+	writeFileSync(csFile, installerCs.trim(), "utf-8");
+	const cscPath = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
+	const cmd = `"${cscPath}" /target:winexe /win32icon:"${ICON_PATH}" /resource:"${payloadZip}",payload.zip /out:"${outExe}" /platform:x64 /optimize+ /reference:System.IO.Compression.dll,System.IO.Compression.FileSystem.dll,Microsoft.CSharp.dll,System.Drawing.dll,System.Windows.Forms.dll "${csFile}"`;
+	execSync(cmd, { stdio: "inherit" });
+	cpSync(outExe, namedExe, { force: true });
+}
 
-execSync(cmd, { stdio: "inherit" });
-cpSync(outExe, namedExe, { force: true });
-
-console.log(`[build-installer] ✓ Setup built successfully: ${outExe}`);
-console.log(`[build-installer] ✓ Setup named copy: ${namedExe}`);
 console.log(`[build-installer] ✓ Portable zip: ${portableZip}`);
+

@@ -24,12 +24,11 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..\artifacts
-OutputBaseFilename=Lakky-Setup-{#MyAppVersion}
+OutputBaseFilename=Lakky-v{#MyAppVersion}-Setup
 SetupIconFile=..\assets\icon.ico
 Compression=lzma2/ultra
 SolidCompression=yes
 WizardStyle=modern
-WizardResizable=no
 WizardImageFile=wizard-side.png
 WizardSmallImageFile=wizard-small.png
 WizardImageAlphaFormat=defined
@@ -38,7 +37,6 @@ UninstallDisplayName={#MyAppName} {#MyAppVersion}
 ChangesAssociations=yes
 CloseApplications=force
 RestartApplications=no
-; ANSI defaults to bytes; force UTF-8 string handling for state.json
 DisableWelcomePage=no
 
 [Languages]
@@ -46,19 +44,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon";   Description: "Create a &desktop shortcut";                    GroupDescription: "Additional shortcuts:"
-Name: "quicklaunchicon"; Description: "Create a &quick launch shortcut";              GroupDescription: "Additional shortcuts:"; Flags: unchecked; OnlyBelowVersion: 6.1
 Name: "associate_audio"; Description: "Associate &audio files (.mp3 .flac .m4a .ogg .opus .wav .aac)";     GroupDescription: "File associations:"
 Name: "associate_video"; Description: "Associate &video files (.mp4 .mkv .webm .mov .avi)";                GroupDescription: "File associations:"; Flags: unchecked
 
 [Files]
-; Whole Electrobun bundle — bin/, Resources/, the lot.
-Source: "..\build\stable-win-x64\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Whole assembled Lakky bundle — bin/, Resources/, Views, and native DLLs.
+Source: "..\build\package\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}";          Filename: "{app}\{#MyAppExePath}"; WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\launcher.exe"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}";    Filename: "{app}\{#MyAppExePath}"; WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\launcher.exe"; Tasks: desktopicon
-Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExePath}"; WorkingDir: "{app}\bin"; Tasks: quicklaunchicon
 
 [Registry]
 ; --- File associations (audio) ---
