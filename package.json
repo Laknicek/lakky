@@ -1,6 +1,6 @@
 {
 	"name": "lakky",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"type": "module",
 	"description": "Lakky — a stunning modern media player built on Electrobun + Bun.",
 	"scripts": {

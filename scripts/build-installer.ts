@@ -11,7 +11,7 @@ const PKG_DIR = join(ROOT, "build", "package", "Lakky");
 const ARTIFACTS_DIR = join(ROOT, "artifacts");
 const ICON_PATH = join(ROOT, "assets", "icon.ico");
 const TRAY_PNG_PATH = join(ROOT, "assets", "tray-32.png");
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
 console.log(`[build-installer] Starting packaging for Lakky v${VERSION}...`);
 
