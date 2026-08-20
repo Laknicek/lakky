@@ -4,7 +4,7 @@ export default {
 	app: {
 		name: "Lakky",
 		identifier: "player.lak.app",
-		version: "1.0.0",
+		version: "1.1.0",
 		description: "A stunning modern media player.",
 	},
 	build: {
