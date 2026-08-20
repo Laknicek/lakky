@@ -72,6 +72,7 @@ type Settings = {
 	accent: string; // hex
 	theme: "midnight" | "aurora" | "solar" | "rose" | "sakura_sunset" | "cyber_neotokyo" | "ghibli_emerald" | "ocean_shinkai" | "midnight_shogun";
 	scenePreset: ScenePreset;
+	sceneOpacity: number; // 0..1 (default 0.25)
 	show3DScene: boolean;
 	sleepTimer: number; // 0 = off; minutes
 	speed: number; // 0.5 - 2.0
@@ -109,6 +110,7 @@ const DEFAULT_SETTINGS: Settings = {
 	accent: "#a78bfa",
 	theme: "sakura_sunset",
 	scenePreset: "sakura_sunset",
+	sceneOpacity: 0.25,
 	show3DScene: true,
 	sleepTimer: 0,
 	speed: 1.0,
@@ -2706,10 +2708,17 @@ function renderSettings(root: HTMLElement) {
 
 		<div class="settings-card">
 			<h3>3D Anime Cel-Shaded Scene</h3>
-			<p>Real-time audio-reactive 3D world with Gerstner ocean waves, Ghibli fluffy foliage trees, and sakura particle physics.</p>
+			<p>Real-time audio-reactive 3D world with Gerstner ocean waves, Ghibli fluffy foliage trees, anime sky dome, and black manga ink outlines.</p>
 			<div class="setting-row">
 				<span>Enable 3D Scene background</span>
 				<div class="toggle ${s.show3DScene ? "on" : ""}" id="t-3d-scene"></div>
+			</div>
+			<div class="setting-row">
+				<span>Scene Opacity (${Math.round((s.sceneOpacity ?? 0.25) * 100)}%)</span>
+				<div style="display:flex;align-items:center;gap:0.75rem">
+					<input type="range" id="sl-scene-opacity" min="0" max="100" value="${Math.round((s.sceneOpacity ?? 0.25) * 100)}" style="width:140px;accent-color:var(--accent)" />
+					<span id="txt-scene-opacity" style="font-size:0.85rem;color:var(--text-dim);width:36px">${Math.round((s.sceneOpacity ?? 0.25) * 100)}%</span>
+				</div>
 			</div>
 			<div class="setting-row">
 				<span>Scene Preset</span>
@@ -2961,6 +2970,16 @@ function renderSettings(root: HTMLElement) {
 		stylized3dScene?.setVisible(state.settings.show3DScene);
 		saveSettings();
 		sfx.toggle();
+	});
+
+	const opacitySlider = document.getElementById("sl-scene-opacity") as HTMLInputElement | null;
+	const opacityTxt = document.getElementById("txt-scene-opacity");
+	opacitySlider?.addEventListener("input", () => {
+		const val = Number(opacitySlider.value) / 100;
+		state.settings.sceneOpacity = val;
+		if (opacityTxt) opacityTxt.textContent = `${opacitySlider.value}%`;
+		stylized3dScene?.setOpacity(val);
+		saveSettings();
 	});
 
 	for (const pb of document.querySelectorAll<HTMLButtonElement>(".scene-preset-btn")) {
@@ -4177,7 +4196,7 @@ function ctxItemsForTrack(t: TrackInfo): CtxItem[] {
 
 	// Initialize 3D Anime Cel-Shaded Scene
 	try {
-		stylized3dScene = new Stylized3DScene(document.body, state.settings.scenePreset ?? "sakura_sunset");
+		stylized3dScene = new Stylized3DScene(document.body, state.settings.scenePreset ?? "sakura_sunset", state.settings.sceneOpacity ?? 0.25);
 		stylized3dScene.setVisible(state.settings.show3DScene);
 	} catch (err) {
 		console.warn("[3D] Stylized3DScene init skipped:", err);

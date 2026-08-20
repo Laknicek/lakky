@@ -10,85 +10,231 @@ export interface AudioBands {
 }
 
 interface PresetTheme {
-	skyTop: THREE.Color;
-	skyBottom: THREE.Color;
+	skyZenith: THREE.Color;
+	skyHorizon: THREE.Color;
+	skyGround: THREE.Color;
+	sunColor: THREE.Color;
+	sunPosition: THREE.Vector3;
+	cloudColor: THREE.Color;
+	cloudShadow: THREE.Color;
 	waterDeep: THREE.Color;
+	waterMid: THREE.Color;
 	waterShallow: THREE.Color;
 	waterFoam: THREE.Color;
+	islandTop: THREE.Color;
+	islandCliff: THREE.Color;
 	foliageColor1: THREE.Color;
 	foliageColor2: THREE.Color;
 	foliageShadow: THREE.Color;
 	trunkColor: THREE.Color;
 	particleColor: THREE.Color;
-	sunColor: THREE.Color;
 	fogColor: THREE.Color;
 	fogDensity: number;
+	starBrightness: number;
 }
 
 const PRESETS: Record<ScenePreset, PresetTheme> = {
 	sakura_sunset: {
-		skyTop: new THREE.Color(0x3a1c54),
-		skyBottom: new THREE.Color(0xf68989),
-		waterDeep: new THREE.Color(0x281b45),
-		waterShallow: new THREE.Color(0xff8c94),
-		waterFoam: new THREE.Color(0xfff0f5),
-		foliageColor1: new THREE.Color(0xff9bb2),
-		foliageColor2: new THREE.Color(0xff6584),
-		foliageShadow: new THREE.Color(0x8a2b53),
-		trunkColor: new THREE.Color(0x4a2e2b),
-		particleColor: new THREE.Color(0xffb7c5),
-		sunColor: new THREE.Color(0xffdf9e),
-		fogColor: new THREE.Color(0x5a2d68),
-		fogDensity: 0.012,
+		skyZenith: new THREE.Color(0x35194d),
+		skyHorizon: new THREE.Color(0xf68388),
+		skyGround: new THREE.Color(0xffb89d),
+		sunColor: new THREE.Color(0xffecd2),
+		sunPosition: new THREE.Vector3(12, 18, -45),
+		cloudColor: new THREE.Color(0xffe3eb),
+		cloudShadow: new THREE.Color(0xb26b8e),
+		waterDeep: new THREE.Color(0x1d1338),
+		waterMid: new THREE.Color(0x56235e),
+		waterShallow: new THREE.Color(0xff8da1),
+		waterFoam: new THREE.Color(0xfff3f8),
+		islandTop: new THREE.Color(0x36482e),
+		islandCliff: new THREE.Color(0x1e1927),
+		foliageColor1: new THREE.Color(0xff9cb6),
+		foliageColor2: new THREE.Color(0xff678a),
+		foliageShadow: new THREE.Color(0x8c2658),
+		trunkColor: new THREE.Color(0x432822),
+		particleColor: new THREE.Color(0xffc2d1),
+		fogColor: new THREE.Color(0x5c2b66),
+		fogDensity: 0.008,
+		starBrightness: 0.25,
 	},
 	ocean_shinkai: {
-		skyTop: new THREE.Color(0x060c24),
-		skyBottom: new THREE.Color(0x133863),
-		waterDeep: new THREE.Color(0x04132b),
+		skyZenith: new THREE.Color(0x04081c),
+		skyHorizon: new THREE.Color(0x0e2f56),
+		skyGround: new THREE.Color(0x08182b),
+		sunColor: new THREE.Color(0xa8ecff),
+		sunPosition: new THREE.Vector3(-15, 22, -45),
+		cloudColor: new THREE.Color(0x386b99),
+		cloudShadow: new THREE.Color(0x0d2238),
+		waterDeep: new THREE.Color(0x030f24),
+		waterMid: new THREE.Color(0x08335e),
 		waterShallow: new THREE.Color(0x00d2ff),
-		waterFoam: new THREE.Color(0xddfbff),
-		foliageColor1: new THREE.Color(0x00e1d9),
-		foliageColor2: new THREE.Color(0x0f8a9d),
-		foliageShadow: new THREE.Color(0x063147),
-		trunkColor: new THREE.Color(0x1e272e),
-		particleColor: new THREE.Color(0x70efff),
-		sunColor: new THREE.Color(0x8ae6ff),
-		fogColor: new THREE.Color(0x081a38),
-		fogDensity: 0.015,
+		waterFoam: new THREE.Color(0xdefbff),
+		islandTop: new THREE.Color(0x1a3330),
+		islandCliff: new THREE.Color(0x0b1721),
+		foliageColor1: new THREE.Color(0x00f0e0),
+		foliageColor2: new THREE.Color(0x0995a8),
+		foliageShadow: new THREE.Color(0x043247),
+		trunkColor: new THREE.Color(0x16222b),
+		particleColor: new THREE.Color(0x75f4ff),
+		fogColor: new THREE.Color(0x091c36),
+		fogDensity: 0.01,
+		starBrightness: 0.9,
 	},
 	cyber_lake: {
-		skyTop: new THREE.Color(0x0f051d),
-		skyBottom: new THREE.Color(0x400036),
-		waterDeep: new THREE.Color(0x120024),
-		waterShallow: new THREE.Color(0xff007f),
+		skyZenith: new THREE.Color(0x0c0217),
+		skyHorizon: new THREE.Color(0x3b003a),
+		skyGround: new THREE.Color(0x1a0026),
+		sunColor: new THREE.Color(0xff007f),
+		sunPosition: new THREE.Vector3(0, 16, -45),
+		cloudColor: new THREE.Color(0x751b75),
+		cloudShadow: new THREE.Color(0x240033),
+		waterDeep: new THREE.Color(0x0d001c),
+		waterMid: new THREE.Color(0x38004d),
+		waterShallow: new THREE.Color(0xff0080),
 		waterFoam: new THREE.Color(0x00ffff),
+		islandTop: new THREE.Color(0x28103d),
+		islandCliff: new THREE.Color(0x0e0317),
 		foliageColor1: new THREE.Color(0x00f5d4),
 		foliageColor2: new THREE.Color(0x7b2cbf),
 		foliageShadow: new THREE.Color(0x240046),
-		trunkColor: new THREE.Color(0x10002b),
-		particleColor: new THREE.Color(0x00f5d4),
-		sunColor: new THREE.Color(0xff007f),
-		fogColor: new THREE.Color(0x1b003a),
-		fogDensity: 0.018,
+		trunkColor: new THREE.Color(0x12002e),
+		particleColor: new THREE.Color(0x00ffff),
+		fogColor: new THREE.Color(0x1d0038),
+		fogDensity: 0.012,
+		starBrightness: 0.7,
 	},
 	ghibli_forest: {
-		skyTop: new THREE.Color(0x1e6fba),
-		skyBottom: new THREE.Color(0x99e5ff),
-		waterDeep: new THREE.Color(0x084c61),
-		waterShallow: new THREE.Color(0x40e0d0),
+		skyZenith: new THREE.Color(0x1c6db8),
+		skyHorizon: new THREE.Color(0x8ce1ff),
+		skyGround: new THREE.Color(0xc2f0ff),
+		sunColor: new THREE.Color(0xfffae6),
+		sunPosition: new THREE.Vector3(18, 26, -40),
+		cloudColor: new THREE.Color(0xffffff),
+		cloudShadow: new THREE.Color(0x94c1e0),
+		waterDeep: new THREE.Color(0x074558),
+		waterMid: new THREE.Color(0x0f798a),
+		waterShallow: new THREE.Color(0x38efdb),
 		waterFoam: new THREE.Color(0xffffff),
-		foliageColor1: new THREE.Color(0x70e000),
-		foliageColor2: new THREE.Color(0x38b000),
-		foliageShadow: new THREE.Color(0x004b23),
-		trunkColor: new THREE.Color(0x5c4033),
-		particleColor: new THREE.Color(0xfff3b0),
-		sunColor: new THREE.Color(0xfff8db),
-		fogColor: new THREE.Color(0x73c2fb),
-		fogDensity: 0.01,
+		islandTop: new THREE.Color(0x407c1e),
+		islandCliff: new THREE.Color(0x2e251a),
+		foliageColor1: new THREE.Color(0x72db00),
+		foliageColor2: new THREE.Color(0x38a800),
+		foliageShadow: new THREE.Color(0x00471f),
+		trunkColor: new THREE.Color(0x523829),
+		particleColor: new THREE.Color(0xffea9f),
+		fogColor: new THREE.Color(0x7ec6f8),
+		fogDensity: 0.007,
+		starBrightness: 0.0,
 	},
 };
 
-// ---------- Water Custom Cel Shader ----------
+// ==========================================
+// 1. Stylized Anime Sky Dome & Clouds Shader
+// ==========================================
+const SkyVertexShader = `
+varying vec3 vWorldPosition;
+varying vec2 vUv;
+
+void main() {
+    vUv = uv;
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPos.xyz;
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+}
+`;
+
+const SkyFragmentShader = `
+uniform vec3 uSkyZenith;
+uniform vec3 uSkyHorizon;
+uniform vec3 uSkyGround;
+uniform vec3 uSunPosition;
+uniform vec3 uSunColor;
+uniform vec3 uCloudColor;
+uniform vec3 uCloudShadow;
+uniform float uTime;
+uniform float uStarBrightness;
+
+varying vec3 vWorldPosition;
+varying vec2 vUv;
+
+// Procedural 2D noise for anime cumulus clouds
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    mat2 rot = mat2(cos(0.5), sin(0.5), -sin(0.5), cos(0.5));
+    for (int i = 0; i < 4; i++) {
+        v += a * noise(p);
+        p = rot * p * 2.0 + vec2(uTime * 0.015);
+        a *= 0.5;
+    }
+    return v;
+}
+
+void main() {
+    vec3 dir = normalize(vWorldPosition);
+    float height = dir.y;
+
+    // Stepped Toon Sky Gradient
+    vec3 skyColor = mix(uSkyHorizon, uSkyZenith, smoothstep(0.0, 0.85, max(0.0, height)));
+    if (height < 0.0) {
+        skyColor = mix(uSkyHorizon, uSkyGround, clamp(-height * 3.0, 0.0, 1.0));
+    }
+
+    // Anime Celestial Sun / Moon Disk with Stepped Glow Aura
+    vec3 sunDir = normalize(uSunPosition);
+    float sunDot = max(0.0, dot(dir, sunDir));
+    float sunDisk = step(0.996, sunDot);
+    float sunHalo1 = smoothstep(0.96, 0.995, sunDot) * 0.5;
+    float sunHalo2 = smoothstep(0.85, 0.96, sunDot) * 0.25;
+    skyColor += (sunDisk + sunHalo1 + sunHalo2) * uSunColor;
+
+    // Starfield for night themes
+    if (uStarBrightness > 0.05 && height > 0.1) {
+        vec2 starUv = dir.xz / (height + 0.15) * 85.0;
+        float starNoise = hash(floor(starUv));
+        if (starNoise > 0.985) {
+            float twinkle = sin(uTime * 4.0 + starNoise * 20.0) * 0.5 + 0.5;
+            skyColor += vec3(twinkle * uStarBrightness * smoothstep(0.1, 0.5, height));
+        }
+    }
+
+    // Anime Drifting Cumulus Cloud Layer
+    if (height > 0.05) {
+        vec2 cloudUv = (dir.xz / (height + 0.25)) * 1.8 + vec2(uTime * 0.012, uTime * 0.005);
+        float cloudShape = fbm(cloudUv);
+
+        // Cel thresholding for sharp anime cloud silhouettes
+        float cloudMask = smoothstep(0.48, 0.55, cloudShape);
+        float cloudLight = smoothstep(0.55, 0.68, cloudShape);
+
+        vec3 cloudFinal = mix(uCloudShadow, uCloudColor, cloudLight);
+        skyColor = mix(skyColor, cloudFinal, cloudMask * smoothstep(0.05, 0.3, height));
+    }
+
+    gl_FragColor = vec4(skyColor, 1.0);
+}
+`;
+
+// ==========================================
+// 2. Stylized Anime Water & Waves Shader
+// ==========================================
 const WaterVertexShader = `
 uniform float uTime;
 uniform float uBass;
@@ -100,7 +246,6 @@ varying vec3 vNormal;
 varying vec2 vUv;
 varying float vElevation;
 
-// Gerstner wave helper
 vec3 gerstnerWave(vec4 wave, vec3 p, inout vec3 tangent, inout vec3 binormal) {
     float steepness = wave.z;
     float wavelength = wave.w;
@@ -135,14 +280,14 @@ void main() {
     vec3 binormal = vec3(0.0, 0.0, 1.0);
     vec3 p = gridPoint;
 
-    // Reactivity to bass kicks
-    float bassScale = 1.0 + uBass * 1.8;
-    float height = uWaveHeight * bassScale;
+    // Reactivity to live bass transients
+    float bassScale = 1.0 + uBass * 1.6;
+    float h = uWaveHeight * bassScale;
 
-    // 3 overlapping Gerstner wave trains for stylized organic ocean flow
-    vec4 w1 = vec4(1.0, 0.5, 0.18 * height, 18.0);
-    vec4 w2 = vec4(0.4, 1.0, 0.12 * height, 10.0);
-    vec4 w3 = vec4(-0.7, 0.6, 0.08 * height, 6.0);
+    // 3 overlapping Gerstner wave trains
+    vec4 w1 = vec4(1.0, 0.4, 0.18 * h, 16.0);
+    vec4 w2 = vec4(0.3, 1.0, 0.12 * h, 9.0);
+    vec4 w3 = vec4(-0.6, 0.7, 0.07 * h, 5.5);
 
     p += gerstnerWave(w1, gridPoint, tangent, binormal);
     p += gerstnerWave(w2, gridPoint, tangent, binormal);
@@ -160,6 +305,7 @@ void main() {
 
 const WaterFragmentShader = `
 uniform vec3 uWaterDeep;
+uniform vec3 uWaterMid;
 uniform vec3 uWaterShallow;
 uniform vec3 uWaterFoam;
 uniform vec3 uSunPosition;
@@ -174,33 +320,26 @@ varying vec3 vNormal;
 varying vec2 vUv;
 varying float vElevation;
 
-// Procedural Voronoi / Water Caustics for cel anime sparkle
-float hash21(vec2 p) {
-    p = fract(p * vec2(234.34, 435.345));
-    p += dot(p, p + 34.23);
-    return fract(p.x * p.y);
-}
-
-vec2 hash22(vec2 p) {
-    float n = hash21(p);
-    return vec2(n, hash21(p + n));
+// Cellular Voronoi pattern for sharp water foam caustics
+vec2 hash2(vec2 p) {
+    return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
 }
 
 float voronoi(vec2 p) {
-    vec2 g = floor(p);
+    vec2 n = floor(p);
     vec2 f = fract(p);
-    float minDist = 1.0;
-    for (int y = -1; y <= 1; y++) {
-        for (int x = -1; x <= 1; x++) {
-            vec2 lattice = vec2(float(x), float(y));
-            vec2 offset = hash22(g + lattice);
-            offset = 0.5 + 0.5 * sin(uTime * 1.5 + 6.2831 * offset);
-            vec2 d = lattice + offset - f;
-            float dist = length(d);
-            minDist = min(minDist, dist);
+    float md = 5.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 g = vec2(float(i), float(j));
+            vec2 o = hash2(n + g);
+            o = 0.5 + 0.5 * sin(uTime * 2.0 + 6.2831 * o);
+            vec2 r = g + o - f;
+            float d = dot(r, r);
+            if (d < md) md = d;
         }
     }
-    return minDist;
+    return sqrt(md);
 }
 
 void main() {
@@ -208,49 +347,63 @@ void main() {
     vec3 V = normalize(cameraPosition - vWorldPosition);
     vec3 L = normalize(uSunPosition);
 
-    // Fresnel effect for anime edge glow
+    // Fresnel rim light for stylized glass/water edge
     float NdotV = max(0.0, dot(N, V));
     float fresnel = pow(1.0 - NdotV, 3.5);
 
-    // Cel-shaded light stepping (Toon discrete bands)
-    float NdotL = dot(N, L);
-    float lightBand = smoothstep(-0.1, 0.05, NdotL) * 0.4 + smoothstep(0.15, 0.35, NdotL) * 0.6;
+    // 4-Tier Discrete Cel Color Palette based on wave depth & elevation
+    float depth = clamp((vElevation + 0.9) * 0.65, 0.0, 1.0);
+    vec3 waterColor = uWaterDeep;
+    if (depth > 0.28) waterColor = mix(uWaterDeep, uWaterMid, smoothstep(0.28, 0.35, depth));
+    if (depth > 0.62) waterColor = mix(uWaterMid, uWaterShallow, smoothstep(0.62, 0.70, depth));
 
-    // Depth color blend based on wave elevation and fresnel
-    float depthFactor = clamp((vElevation + 1.2) * 0.5, 0.0, 1.0);
-    vec3 waterColor = mix(uWaterDeep, uWaterShallow, depthFactor);
-    waterColor = mix(waterColor, uWaterShallow * 1.35, fresnel * 0.7);
+    // Foam crest lines on high waves
+    float foamNoise = voronoi(vWorldPosition.xz * 0.45);
+    float foamMask = smoothstep(0.35, 0.48, vElevation) * smoothstep(0.25, 0.45, foamNoise);
 
-    // Foam calculation on wave crests
-    float foamThreshold = 0.45;
-    float foam = smoothstep(foamThreshold, foamThreshold + 0.15, vElevation);
-
-    // Water caustics & glimmers reactive to treble
-    vec2 causticUv = vWorldPosition.xz * 0.35;
-    float caust = voronoi(causticUv + vec2(uTime * 0.2));
-    float causticLines = smoothstep(0.08, 0.02, caust) * (0.4 + uTreble * 1.2);
-
-    // Anime specular glint (discrete sharp star highlight)
+    // Treble-reactive glistening star highlights
     vec3 H = normalize(L + V);
     float NdotH = max(0.0, dot(N, H));
-    float spec = pow(NdotH, 128.0);
-    float celSpec = step(0.85, spec);
+    float spec = pow(NdotH, 96.0);
+    float starGlint = step(0.82, spec) * (1.2 + uTreble * 2.0);
 
-    vec3 finalColor = mix(waterColor, uWaterFoam, foam * 0.85);
-    finalColor += causticLines * uWaterFoam;
-    finalColor += celSpec * uSunColor * (1.5 + uTreble * 1.5);
-    finalColor *= (0.7 + lightBand * 0.4);
+    vec3 finalColor = mix(waterColor, uWaterFoam, foamMask * 0.85);
+    finalColor = mix(finalColor, uWaterShallow * 1.3, fresnel * 0.65);
+    finalColor += starGlint * uSunColor;
 
-    // Volumetric fog
+    // Distance atmospheric fog blend
     float dist = length(cameraPosition - vWorldPosition);
     float fogFactor = 1.0 - exp(-dist * dist * uFogDensity * uFogDensity);
     finalColor = mix(finalColor, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
-    gl_FragColor = vec4(finalColor, 0.95);
+    gl_FragColor = vec4(finalColor, 0.94);
 }
 `;
 
-// ---------- Foliage Custom Cel Shader ----------
+// ==========================================
+// 3. Black Ink Anime Cel Outline Shaders
+// ==========================================
+const OutlineVertexShader = `
+uniform float uOutlineWidth;
+
+void main() {
+    // Inverted hull extrusion along vertex normal
+    vec3 transformed = position + normal * uOutlineWidth;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+}
+`;
+
+const OutlineFragmentShader = `
+uniform vec3 uOutlineColor;
+
+void main() {
+    gl_FragColor = vec4(uOutlineColor, 1.0);
+}
+`;
+
+// ==========================================
+// 4. Stylized Ghibli Foliage Shader
+// ==========================================
 const FoliageVertexShader = `
 uniform float uTime;
 uniform float uMid;
@@ -264,11 +417,11 @@ void main() {
     vUv = uv;
     vec3 p = position;
 
-    // Wind wave sway with mid-frequency audio reactivity
-    float swayAmp = 0.25 + uMid * 0.6;
-    float wind = sin(uTime * uWindSpeed + p.x * 0.5 + p.y * 0.8) * cos(uTime * uWindSpeed * 0.7 + p.z * 0.5);
-    p.x += wind * swayAmp * (p.y * 0.15);
-    p.z += wind * 0.5 * swayAmp * (p.y * 0.15);
+    // Audio-reactive wind sway (mid frequencies)
+    float swayAmp = 0.22 + uMid * 0.55;
+    float wind = sin(uTime * uWindSpeed + p.x * 0.6 + p.y * 0.9) * cos(uTime * uWindSpeed * 0.8 + p.z * 0.6);
+    p.x += wind * swayAmp * (p.y * 0.12);
+    p.z += wind * 0.45 * swayAmp * (p.y * 0.12);
 
     vec4 worldPos = modelMatrix * vec4(p, 1.0);
     vWorldPosition = worldPos.xyz;
@@ -296,16 +449,18 @@ void main() {
     vec3 V = normalize(cameraPosition - vWorldPosition);
 
     float NdotL = dot(N, L);
-    // Ghibli style 3-tone discrete cel shading
-    float tone = smoothstep(-0.2, 0.05, NdotL) * 0.5 + smoothstep(0.2, 0.4, NdotL) * 0.5;
+    // 3-Tone discrete stepped Ghibli anime shading
+    float tone = 0.0;
+    if (NdotL > -0.15) tone = 0.5;
+    if (NdotL > 0.28)  tone = 1.0;
 
     vec3 baseColor = mix(uFoliageColor2, uFoliageColor1, tone);
-    vec3 litColor = mix(uFoliageShadow, baseColor, tone);
+    vec3 litColor = mix(uFoliageShadow, baseColor, smoothstep(0.0, 0.5, tone));
 
-    // Rim lighting (Anime backlight halo)
+    // Anime Rim / Backlight Glow
     float rim = 1.0 - max(0.0, dot(N, V));
-    rim = smoothstep(0.65, 0.9, rim) * max(0.0, dot(-L, V) + 0.3);
-    litColor += rim * uSunColor * 0.5;
+    rim = smoothstep(0.68, 0.92, rim) * max(0.0, dot(-L, V) + 0.35);
+    litColor += rim * uSunColor * 0.45;
 
     // Distance fog
     float dist = length(cameraPosition - vWorldPosition);
@@ -322,28 +477,32 @@ export class Stylized3DScene {
 	private renderer: THREE.WebGLRenderer;
 	private scene: THREE.Scene;
 	private camera: THREE.PerspectiveCamera;
+	private skyMaterial!: THREE.ShaderMaterial;
 	private waterMaterial!: THREE.ShaderMaterial;
 	private foliageMaterial!: THREE.ShaderMaterial;
+	private outlineMaterial!: THREE.ShaderMaterial;
 	private particleSystem!: THREE.Points;
 	private particleGeo!: THREE.BufferGeometry;
 	private particleVelocities!: Float32Array;
 	private trees: THREE.Group[] = [];
-	private islands: THREE.Mesh[] = [];
+	private islands: THREE.Group[] = [];
 	private preset: ScenePreset = "sakura_sunset";
 	private clock = new THREE.Clock();
 	private running = false;
+	private visible = true;
+	private targetOpacity = 0.25;
 	private rafId: number | null = null;
-	private targetFps = 60;
 	private mouseX = 0;
 	private mouseY = 0;
 	private targetCamX = 0;
-	private targetCamY = 8;
+	private targetCamY = 7;
 	private currentBands: AudioBands = { bass: 0, mid: 0, treble: 0, energy: 0 };
 	private resizeObserver: ResizeObserver;
 
-	constructor(container: HTMLElement, preset: ScenePreset = "sakura_sunset") {
+	constructor(container: HTMLElement, preset: ScenePreset = "sakura_sunset", initialOpacity: number = 0.25) {
 		this.container = container;
 		this.preset = preset;
+		this.targetOpacity = initialOpacity;
 
 		this.canvas = document.createElement("canvas");
 		this.canvas.className = "stylized-3d-canvas";
@@ -355,25 +514,25 @@ export class Stylized3DScene {
 			height: 100%;
 			pointer-events: none;
 			z-index: 0;
-			opacity: 0;
-			transition: opacity 0.8s ease;
+			opacity: ${initialOpacity};
+			transition: opacity 0.5s ease;
 		`;
 		this.container.appendChild(this.canvas);
 
 		this.scene = new THREE.Scene();
-		this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
-		this.camera.position.set(0, 7, 24);
-		this.camera.lookAt(0, 2, 0);
+		this.camera = new THREE.PerspectiveCamera(48, 1, 0.1, 800);
+		this.camera.position.set(0, 6.5, 26);
+		this.camera.lookAt(0, 2.8, 0);
 
 		this.renderer = new THREE.WebGLRenderer({
 			canvas: this.canvas,
 			antialias: true,
-			alpha: true,
+			alpha: false,
 			powerPreference: "high-performance",
 		});
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 		this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-		this.renderer.toneMappingExposure = 1.1;
+		this.renderer.toneMappingExposure = 1.15;
 
 		this.buildScene();
 		this.applyPreset(this.preset);
@@ -406,8 +565,16 @@ export class Stylized3DScene {
 		this.applyPreset(preset);
 	}
 
+	public setOpacity(opacity: number) {
+		this.targetOpacity = Math.max(0, Math.min(1, opacity));
+		if (this.visible) {
+			this.canvas.style.opacity = String(this.targetOpacity);
+		}
+	}
+
 	public setVisible(visible: boolean) {
-		this.canvas.style.opacity = visible ? "1" : "0";
+		this.visible = visible;
+		this.canvas.style.opacity = visible ? String(this.targetOpacity) : "0";
 		if (visible && !this.running) {
 			this.start();
 		} else if (!visible && this.running) {
@@ -415,19 +582,29 @@ export class Stylized3DScene {
 		}
 	}
 
-	public setFpsCap(fps: number) {
-		this.targetFps = Math.max(15, Math.min(120, fps));
-	}
-
 	private applyPreset(pName: ScenePreset) {
 		const theme = PRESETS[pName] || PRESETS.sakura_sunset;
+
+		// Sky uniforms
+		if (this.skyMaterial) {
+			this.skyMaterial.uniforms.uSkyZenith.value.copy(theme.skyZenith);
+			this.skyMaterial.uniforms.uSkyHorizon.value.copy(theme.skyHorizon);
+			this.skyMaterial.uniforms.uSkyGround.value.copy(theme.skyGround);
+			this.skyMaterial.uniforms.uSunColor.value.copy(theme.sunColor);
+			this.skyMaterial.uniforms.uSunPosition.value.copy(theme.sunPosition);
+			this.skyMaterial.uniforms.uCloudColor.value.copy(theme.cloudColor);
+			this.skyMaterial.uniforms.uCloudShadow.value.copy(theme.cloudShadow);
+			this.skyMaterial.uniforms.uStarBrightness.value = theme.starBrightness;
+		}
 
 		// Water uniforms
 		if (this.waterMaterial) {
 			this.waterMaterial.uniforms.uWaterDeep.value.copy(theme.waterDeep);
+			this.waterMaterial.uniforms.uWaterMid.value.copy(theme.waterMid);
 			this.waterMaterial.uniforms.uWaterShallow.value.copy(theme.waterShallow);
 			this.waterMaterial.uniforms.uWaterFoam.value.copy(theme.waterFoam);
 			this.waterMaterial.uniforms.uSunColor.value.copy(theme.sunColor);
+			this.waterMaterial.uniforms.uSunPosition.value.copy(theme.sunPosition);
 			this.waterMaterial.uniforms.uFogColor.value.copy(theme.fogColor);
 			this.waterMaterial.uniforms.uFogDensity.value = theme.fogDensity;
 		}
@@ -438,6 +615,7 @@ export class Stylized3DScene {
 			this.foliageMaterial.uniforms.uFoliageColor2.value.copy(theme.foliageColor2);
 			this.foliageMaterial.uniforms.uFoliageShadow.value.copy(theme.foliageShadow);
 			this.foliageMaterial.uniforms.uSunColor.value.copy(theme.sunColor);
+			this.foliageMaterial.uniforms.uSunPosition.value.copy(theme.sunPosition);
 			this.foliageMaterial.uniforms.uFogColor.value.copy(theme.fogColor);
 			this.foliageMaterial.uniforms.uFogDensity.value = theme.fogDensity;
 		}
@@ -450,8 +628,41 @@ export class Stylized3DScene {
 	}
 
 	private buildScene() {
-		// 1. Water Ocean Plane
-		const waterGeo = new THREE.PlaneGeometry(120, 120, 140, 140);
+		// 1. Stylized Anime Sky Dome
+		const skyGeo = new THREE.SphereGeometry(300, 32, 24);
+		this.skyMaterial = new THREE.ShaderMaterial({
+			vertexShader: SkyVertexShader,
+			fragmentShader: SkyFragmentShader,
+			uniforms: {
+				uTime: { value: 0 },
+				uSkyZenith: { value: new THREE.Color() },
+				uSkyHorizon: { value: new THREE.Color() },
+				uSkyGround: { value: new THREE.Color() },
+				uSunPosition: { value: new THREE.Vector3(12, 18, -45) },
+				uSunColor: { value: new THREE.Color() },
+				uCloudColor: { value: new THREE.Color() },
+				uCloudShadow: { value: new THREE.Color() },
+				uStarBrightness: { value: 0.3 },
+			},
+			side: THREE.BackSide,
+			depthWrite: false,
+		});
+		const skyMesh = new THREE.Mesh(skyGeo, this.skyMaterial);
+		this.scene.add(skyMesh);
+
+		// 2. Black Ink Anime Outline Material
+		this.outlineMaterial = new THREE.ShaderMaterial({
+			vertexShader: OutlineVertexShader,
+			fragmentShader: OutlineFragmentShader,
+			uniforms: {
+				uOutlineWidth: { value: 0.05 },
+				uOutlineColor: { value: new THREE.Color(0x0a0914) },
+			},
+			side: THREE.BackSide,
+		});
+
+		// 3. Water Ocean Plane
+		const waterGeo = new THREE.PlaneGeometry(140, 140, 160, 160);
 		waterGeo.rotateX(-Math.PI / 2);
 
 		this.waterMaterial = new THREE.ShaderMaterial({
@@ -461,72 +672,89 @@ export class Stylized3DScene {
 				uTime: { value: 0 },
 				uBass: { value: 0 },
 				uTreble: { value: 0 },
-				uWaveSpeed: { value: 1.2 },
-				uWaveHeight: { value: 0.75 },
+				uWaveSpeed: { value: 1.1 },
+				uWaveHeight: { value: 0.7 },
 				uWaterDeep: { value: new THREE.Color() },
+				uWaterMid: { value: new THREE.Color() },
 				uWaterShallow: { value: new THREE.Color() },
 				uWaterFoam: { value: new THREE.Color() },
-				uSunPosition: { value: new THREE.Vector3(10, 25, -20) },
+				uSunPosition: { value: new THREE.Vector3(12, 18, -45) },
 				uSunColor: { value: new THREE.Color() },
 				uFogColor: { value: new THREE.Color() },
-				uFogDensity: { value: 0.012 },
+				uFogDensity: { value: 0.008 },
 			},
 			transparent: true,
 			wireframe: false,
 		});
 
 		const waterMesh = new THREE.Mesh(waterGeo, this.waterMaterial);
-		waterMesh.position.y = -0.5;
+		waterMesh.position.y = -0.4;
 		this.scene.add(waterMesh);
 
-		// 2. Foliage Material for Anime Trees
+		// 4. Foliage Material for Ghibli Anime Trees
 		this.foliageMaterial = new THREE.ShaderMaterial({
 			vertexShader: FoliageVertexShader,
 			fragmentShader: FoliageFragmentShader,
 			uniforms: {
 				uTime: { value: 0 },
 				uMid: { value: 0 },
-				uWindSpeed: { value: 1.5 },
+				uWindSpeed: { value: 1.4 },
 				uFoliageColor1: { value: new THREE.Color() },
 				uFoliageColor2: { value: new THREE.Color() },
 				uFoliageShadow: { value: new THREE.Color() },
-				uSunPosition: { value: new THREE.Vector3(10, 25, -20) },
+				uSunPosition: { value: new THREE.Vector3(12, 18, -45) },
 				uSunColor: { value: new THREE.Color() },
 				uFogColor: { value: new THREE.Color() },
-				uFogDensity: { value: 0.012 },
+				uFogDensity: { value: 0.008 },
 			},
 		});
 
-		// 3. Central & Surrounding Islands with Stylized Trees
-		this.createIsland(0, -0.6, -2, 7.5, 2.2);
-		this.createIsland(-14, -0.8, -12, 5.5, 1.8);
-		this.createIsland(15, -0.8, -10, 6.0, 1.9);
+		// 5. Tiered Sculpted Islands with Ink Outline
+		this.createTieredIsland(0, -0.6, -2, 8.0, 2.5, 0x223326, 0x181a24);
+		this.createTieredIsland(-15, -0.7, -13, 6.0, 2.0, 0x1d2e20, 0x14151e);
+		this.createTieredIsland(16, -0.7, -11, 6.5, 2.2, 0x1f3022, 0x151620);
 
-		// Spawn trees on islands
-		this.createAnimeTree(0, 1.2, -2, 1.3);
-		this.createAnimeTree(-2.8, 0.9, -1.2, 0.95);
-		this.createAnimeTree(2.4, 0.8, -3.0, 1.05);
-		this.createAnimeTree(-13.5, 0.8, -11.5, 1.1);
-		this.createAnimeTree(14.2, 0.9, -9.5, 1.15);
+		// 6. Spawn Detailed Anime Trees with Outlines
+		this.createAnimeTree(0, 1.4, -2, 1.35);
+		this.createAnimeTree(-3.0, 1.0, -1.0, 0.95);
+		this.createAnimeTree(2.8, 0.9, -3.2, 1.05);
+		this.createAnimeTree(-14.5, 0.9, -12.5, 1.15);
+		this.createAnimeTree(15.2, 1.0, -10.5, 1.2);
 
-		// 4. Sakura / Ember Floating Particles
-		this.createParticles(400);
-
-		// 5. Ambient Celestial Toon Sun/Moon Disk
-		const sunGeo = new THREE.SphereGeometry(3.5, 24, 24);
-		const sunMat = new THREE.MeshBasicMaterial({ color: 0xfff0dd });
-		const sunMesh = new THREE.Mesh(sunGeo, sunMat);
-		sunMesh.position.set(10, 25, -50);
-		this.scene.add(sunMesh);
+		// 7. Calmer Sakura / Ember Floating Particles (Reduced to 45 elegant petals)
+		this.createParticles(45);
 	}
 
-	private createIsland(x: number, y: number, z: number, rad: number, height: number) {
-		const geo = new THREE.CylinderGeometry(rad * 0.85, rad, height, 16);
-		const mat = new THREE.MeshBasicMaterial({ color: 0x1f2937 });
-		const island = new THREE.Mesh(geo, mat);
-		island.position.set(x, y + height / 2, z);
-		this.scene.add(island);
-		this.islands.push(island);
+	private createTieredIsland(x: number, y: number, z: number, rad: number, height: number, topCol: number, cliffCol: number) {
+		const group = new THREE.Group();
+		group.position.set(x, y, z);
+
+		// Base rocky cliff
+		const cliffGeo = new THREE.CylinderGeometry(rad * 0.88, rad * 1.05, height, 18);
+		const cliffMat = new THREE.MeshBasicMaterial({ color: cliffCol });
+		const cliffMesh = new THREE.Mesh(cliffGeo, cliffMat);
+		cliffMesh.position.y = height / 2;
+		group.add(cliffMesh);
+
+		// Black outline for island cliff
+		const cliffOutline = new THREE.Mesh(cliffGeo, this.outlineMaterial);
+		cliffOutline.position.y = height / 2;
+		group.add(cliffOutline);
+
+		// Mossy green plateau cap
+		const capGeo = new THREE.CylinderGeometry(rad * 0.92, rad * 0.9, 0.4, 18);
+		const capMat = new THREE.MeshBasicMaterial({ color: topCol });
+		const capMesh = new THREE.Mesh(capGeo, capMat);
+		capMesh.position.y = height + 0.15;
+		group.add(capMesh);
+
+		// Black outline for cap
+		const capOutline = new THREE.Mesh(capGeo, this.outlineMaterial);
+		capOutline.position.y = height + 0.15;
+		group.add(capOutline);
+
+		this.scene.add(group);
+		this.islands.push(group);
 	}
 
 	private createAnimeTree(x: number, y: number, z: number, scale: number) {
@@ -534,38 +762,49 @@ export class Stylized3DScene {
 		treeGroup.position.set(x, y, z);
 		treeGroup.scale.setScalar(scale);
 
-		// Trunk
-		const trunkGeo = new THREE.CylinderGeometry(0.2, 0.45, 3.2, 8);
-		const trunkMat = new THREE.MeshBasicMaterial({ color: 0x3d2817 });
+		// Detailed curved trunk
+		const trunkGeo = new THREE.CylinderGeometry(0.18, 0.48, 3.4, 10);
+		const trunkMat = new THREE.MeshBasicMaterial({ color: 0x3d2719 });
 		const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-		trunk.position.y = 1.6;
+		trunk.position.y = 1.7;
 		treeGroup.add(trunk);
 
-		// Multi-sphere fluffy Ghibli foliage clusters
+		// Black outline on trunk
+		const trunkOutline = new THREE.Mesh(trunkGeo, this.outlineMaterial);
+		trunkOutline.position.y = 1.7;
+		treeGroup.add(trunkOutline);
+
+		// Fluffy Ghibli foliage clusters with black contour outlines
 		const clusterCoords = [
-			[0, 3.6, 0, 1.5],
-			[-0.9, 3.2, 0.4, 1.1],
-			[0.8, 3.3, -0.3, 1.15],
-			[0.2, 4.4, 0.1, 1.2],
-			[-0.4, 3.9, -0.7, 1.0],
+			[0, 3.8, 0, 1.55],
+			[-1.0, 3.3, 0.4, 1.15],
+			[0.9, 3.4, -0.4, 1.2],
+			[0.2, 4.6, 0.1, 1.25],
+			[-0.5, 4.0, -0.8, 1.05],
+			[0.6, 4.1, 0.7, 1.1],
 		];
 
 		for (const [cx, cy, cz, cr] of clusterCoords) {
 			const foliageGeo = new THREE.DodecahedronGeometry(cr, 2);
-			// Soften vertices for organic clump look
 			const pos = foliageGeo.attributes.position;
 			for (let i = 0; i < pos.count; i++) {
 				const vx = pos.getX(i);
 				const vy = pos.getY(i);
 				const vz = pos.getZ(i);
-				const noise = 1.0 + (Math.sin(vx * 3.0) + Math.cos(vy * 3.0)) * 0.08;
+				const noise = 1.0 + (Math.sin(vx * 2.8) + Math.cos(vy * 2.8)) * 0.09;
 				pos.setXYZ(i, vx * noise, vy * noise, vz * noise);
 			}
 			foliageGeo.computeVertexNormals();
 
+			// Core foliage mesh
 			const foliageClump = new THREE.Mesh(foliageGeo, this.foliageMaterial);
 			foliageClump.position.set(cx, cy, cz);
 			treeGroup.add(foliageClump);
+
+			// Black ink outline mesh
+			const outlineClump = new THREE.Mesh(foliageGeo, this.outlineMaterial);
+			outlineClump.position.set(cx, cy, cz);
+			treeGroup.add(outlineClump);
 		}
 
 		this.scene.add(treeGroup);
@@ -578,19 +817,19 @@ export class Stylized3DScene {
 		this.particleVelocities = new Float32Array(count * 3);
 
 		for (let i = 0; i < count; i++) {
-			positions[i * 3] = (Math.random() - 0.5) * 50;
-			positions[i * 3 + 1] = Math.random() * 18 + 0.5;
-			positions[i * 3 + 2] = (Math.random() - 0.5) * 50;
+			positions[i * 3] = (Math.random() - 0.5) * 40;
+			positions[i * 3 + 1] = Math.random() * 16 + 1.0;
+			positions[i * 3 + 2] = (Math.random() - 0.5) * 40;
 
-			this.particleVelocities[i * 3] = (Math.random() - 0.5) * 0.04;
-			this.particleVelocities[i * 3 + 1] = -(Math.random() * 0.03 + 0.01);
-			this.particleVelocities[i * 3 + 2] = (Math.random() - 0.5) * 0.04;
+			this.particleVelocities[i * 3] = (Math.random() - 0.5) * 0.025;
+			this.particleVelocities[i * 3 + 1] = -(Math.random() * 0.02 + 0.008);
+			this.particleVelocities[i * 3 + 2] = (Math.random() - 0.5) * 0.025;
 		}
 
 		this.particleGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
 
 		const particleMat = new THREE.PointsMaterial({
-			size: 0.35,
+			size: 0.42,
 			color: 0xffb7c5,
 			transparent: true,
 			opacity: 0.85,
@@ -632,10 +871,12 @@ export class Stylized3DScene {
 		if (!this.running) return;
 		this.rafId = requestAnimationFrame(this.renderLoop);
 
-		const delta = this.clock.getDelta();
 		const time = this.clock.getElapsedTime();
 
 		// Update shader uniforms
+		if (this.skyMaterial) {
+			this.skyMaterial.uniforms.uTime.value = time;
+		}
 		if (this.waterMaterial) {
 			this.waterMaterial.uniforms.uTime.value = time;
 		}
@@ -643,31 +884,30 @@ export class Stylized3DScene {
 			this.foliageMaterial.uniforms.uTime.value = time;
 		}
 
-		// Interactive smooth camera parallax tilt
-		this.targetCamX = this.mouseX * 3.5;
-		this.targetCamY = 6.5 - this.mouseY * 2.0;
-		this.camera.position.x += (this.targetCamX - this.camera.position.x) * 0.05;
-		this.camera.position.y += (this.targetCamY - this.camera.position.y) * 0.05;
+		// Smooth camera parallax tilt
+		this.targetCamX = this.mouseX * 3.0;
+		this.targetCamY = 6.5 - this.mouseY * 1.8;
+		this.camera.position.x += (this.targetCamX - this.camera.position.x) * 0.04;
+		this.camera.position.y += (this.targetCamY - this.camera.position.y) * 0.04;
 		this.camera.lookAt(0, 2.5, 0);
 
-		// Animate particles (Sakura petals flutter down with gentle turbulence)
+		// Animate calm floating sakura petals
 		if (this.particleGeo && this.particleVelocities) {
 			const posAttr = this.particleGeo.attributes.position;
 			const posArr = posAttr.array as Float32Array;
 			const count = posArr.length / 3;
-			const swirl = 1.0 + this.currentBands.mid * 2.5;
+			const swirl = 1.0 + this.currentBands.mid * 2.0;
 
 			for (let i = 0; i < count; i++) {
 				const idx = i * 3;
-				posArr[idx] += (this.particleVelocities[idx] + Math.sin(time + i) * 0.02) * swirl;
+				posArr[idx] += (this.particleVelocities[idx] + Math.sin(time * 0.8 + i) * 0.015) * swirl;
 				posArr[idx + 1] += this.particleVelocities[idx + 1];
-				posArr[idx + 2] += (this.particleVelocities[idx + 2] + Math.cos(time + i) * 0.02) * swirl;
+				posArr[idx + 2] += (this.particleVelocities[idx + 2] + Math.cos(time * 0.8 + i) * 0.015) * swirl;
 
-				// Loop reset if dropped below water or drifted out of bounds
-				if (posArr[idx + 1] < 0.1 || Math.abs(posArr[idx]) > 28 || Math.abs(posArr[idx + 2]) > 28) {
-					posArr[idx] = (Math.random() - 0.5) * 45;
-					posArr[idx + 1] = 16 + Math.random() * 4;
-					posArr[idx + 2] = (Math.random() - 0.5) * 45;
+				if (posArr[idx + 1] < 0.1 || Math.abs(posArr[idx]) > 25 || Math.abs(posArr[idx + 2]) > 25) {
+					posArr[idx] = (Math.random() - 0.5) * 38;
+					posArr[idx + 1] = 14 + Math.random() * 3;
+					posArr[idx + 2] = (Math.random() - 0.5) * 38;
 				}
 			}
 			posAttr.needsUpdate = true;
