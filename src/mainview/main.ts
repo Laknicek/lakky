@@ -9,8 +9,8 @@ import type {
 	LatestReleaseInfo,
 } from "../shared/rpcSchema";
 import { compareVersions } from "../shared/rpcSchema";
-import { AudioEngine, EQ_PRESETS, EQ_BANDS, type RepeatMode } from "./audio";
-import { Visualizer, type VizStyle } from "./visualizer";
+import { AudioEngine, EQ_PRESETS, EQ_BANDS, DEFAULT_DSP_SETTINGS, type DspSettings, type RepeatMode } from "./audio";
+import { Visualizer, type VizStyle, type AnimeGradient, ANIME_GRADIENTS } from "./visualizer";
 import { sfx, primeAudio, setSfxEnabled } from "./sfx";
 import { iconUrl } from "./logo";
 import { installTooltips } from "./tooltip";
@@ -21,6 +21,9 @@ import { renderNodeEditor } from "./nodeEditor";
 import { escapeHtml } from "./util";
 import { Echoes, computeEchoes, type EchoesData } from "./echoes";
 import { Stylized3DScene, type ScenePreset, type AudioBands } from "./stylized3d";
+import { generateQrSvg } from "./qrcode";
+import { toRomaji, findActiveLyricIndex, containsJapanese, type LyricLine, type LyricMode } from "./lyricsUtil";
+import { cinemaEngine } from "./video";
 
 // ---------- RPC ----------
 const rpc = Electroview.defineRPC<PlayerRPC>({
@@ -69,6 +72,7 @@ type Settings = {
 	crossfade: number; // seconds, 0 = off
 	eq: number[];
 	eqPreset: string;
+	dsp: DspSettings;
 	accent: string; // hex
 	theme: "midnight" | "aurora" | "solar" | "rose" | "sakura_sunset" | "cyber_neotokyo" | "ghibli_emerald" | "ocean_shinkai" | "midnight_shogun";
 	scenePreset: ScenePreset;
@@ -85,6 +89,10 @@ type Settings = {
 	idleViz: boolean;      // pulse while paused (off saves a touch more GPU)
 	vizStyle: VizStyle;    // bars | wave | radial | mirror — for the Now Playing visualizer
 	showStripViz: boolean; // when false, the bottom-bar strip visualizer's div is removed entirely
+	spatial8D: boolean;    // 8D spatial audio binaural rotation
+	stripGradient: AnimeGradient; // anime spectrum gradient palette
+	pitchMode: "normal" | "nightcore" | "lofi"; // pitch & speed modes
+	preservesPitch: boolean; // lock pitch during speed adjustments
 	// Auto-updater
 	updateRepo: string;
 	updateChannel: "stable" | "canary";
@@ -105,8 +113,9 @@ const DEFAULT_SETTINGS: Settings = {
 	sfx: true,
 	discord: true,
 	crossfade: 0,
-	eq: [...EQ_PRESETS.Flat],
-	eqPreset: "Flat",
+	eq: [...EQ_PRESETS["Anime J-Pop"]],
+	eqPreset: "Anime J-Pop",
+	dsp: { ...DEFAULT_DSP_SETTINGS },
 	accent: "#a78bfa",
 	theme: "sakura_sunset",
 	scenePreset: "sakura_sunset",
@@ -124,6 +133,10 @@ const DEFAULT_SETTINGS: Settings = {
 	idleViz: true,
 	vizStyle: "bars",
 	showStripViz: true,
+	spatial8D: false,
+	stripGradient: "cyber_neon",
+	pitchMode: "normal",
+	preservesPitch: true,
 	updateRepo: "Laknicek/lakky",
 	updateChannel: "stable",
 	autoCheckUpdates: true,
@@ -143,7 +156,7 @@ const state = {
 	currentTrack: null as TrackInfo | null,
 	settings: { ...DEFAULT_SETTINGS } as Settings,
 	playStats: {} as Record<string, number>, // trackId -> count
-	playlists: [] as { name: string; ids: string[] }[],
+	playlists: [] as { name: string; ids: string[]; artDataUrl?: string; description?: string }[],
 	queueOpen: false,
 	discordConnected: false,
 	searchQuery: "",
@@ -155,7 +168,14 @@ const state = {
 	miniOpen: false,
 	mutedVolume: 0.85, // pre-mute volume for restore
 	recentlyPlayed: [] as string[], // track IDs in most-recent-first order
-	librarySort: "title" as "title" | "artist" | "album" | "duration" | "year",
+	libraryTab: "tracks" as "tracks" | "albums" | "artists" | "dropzone",
+	libraryFilterTag: "all" as "all" | "hires" | "anime" | "video" | "favorites" | "recent",
+	librarySort: "title" as "index" | "title" | "artist" | "album" | "duration" | "codec" | "safety" | "plays" | "year",
+	librarySortAsc: true,
+	activeAlbumKey: null as string | null,
+	activeArtistKey: null as string | null,
+	activePlaylistName: null as string | null,
+	playlistSearchQuery: "",
 	ratings: {} as Record<string, number>, // trackId → 1-5 stars
 	playDates: {} as Record<string, number[]>, // trackId → epoch-ms timestamps
 	abLoop: null as { a: number; b: number } | null,
@@ -171,11 +191,22 @@ const state = {
 	// Most recent release the updater discovered. Non-null only while the
 	// update card is mounted and dismissible.
 	pendingUpdate: null as LatestReleaseInfo | null,
+	quickEffects: {
+		eightD: false,
+		bassBoost: false,
+		vocalEnhance: false,
+		reverbHall: false,
+	},
+	lyricsMode: "dual" as LyricMode,
+	lyricsCache: {} as Record<string, { plain: string | null; synced: LyricLine[] }>,
+	lyricsLoading: false,
+	activeLyricIndex: -1,
+	inspectorOpen: false,
 };
 
 // Mirrors package.json so we have something to compare release tags against
 // without bundling the JSON. Bump in lockstep on every release.
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0";
 
 // ---------- DOM ----------
 const splashEl = document.getElementById("splash")!;
@@ -320,6 +351,9 @@ function attachEngineHandlers() {
 			updateMediaSessionPosition();
 			maybeStartCrossfade(cur, dur);
 			if (immersiveActive) updateImmersiveProgress(cur, dur);
+			if (usingVideo && state.view === "nowplaying") {
+				cinemaEngine.updateProgress(cur, dur);
+			}
 		},
 		onEnded: () => {
 			if (crossfading) return;
@@ -1023,6 +1057,8 @@ async function applyNodeGraph(graph: NodeGraph | null) {
 		console.warn("[node-graph] engineB failed:", err);
 	}
 }
+
+
 // Expose for the node editor sibling agent. It can read state.nodeGraph and
 // call window.applyNodeGraph(g) to commit changes without importing this file.
 window.applyNodeGraph = applyNodeGraph;
@@ -1128,6 +1164,47 @@ const icons = {
 	shieldCheck: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`,
 	shieldAlert: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
 	world3d: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>`,
+	eightD: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="9" ry="3.5" transform="rotate(-25 12 12)"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/></svg>`,
+	bass: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10v4M6 6v12M10 3v18M14 7v10M18 5v14M22 10v4"/></svg>`,
+	vocal: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>`,
+	reverb: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M7 18v-4a5 5 0 0 1 10 0v4"/><circle cx="12" cy="18" r="1.5" fill="currentColor"/></svg>`,
+	copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+	mic: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`,
+	text: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>`,
+	sort: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 16 4 4 4-4M7 20V4M21 8l-4-4-4 4M17 4v16"/></svg>`,
+	sortAsc: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 4-4 4 4M7 4v16M14 8h7M14 12h5M14 16h3"/></svg>`,
+	sortDesc: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 16 4 4 4-4M7 20V4M14 8h7M14 12h5M14 16h3"/></svg>`,
+	filter: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>`,
+	flame: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c1 3 4 5 4 9 0 3.3-2.7 6-6 6s-6-2.7-6-6c0-3.5 2.5-6.2 4.5-7.8.3-.3.8-.1.8.3 0 1.5.8 2.8 1.8 3.5.3.2.7 0 .7-.4 0-1.8.4-3.4 1.2-4.6z"/></svg>`,
+	star: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`,
+	starFill: `<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`,
+	heart: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`,
+	heartFill: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`,
+	palette: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>`,
+	chevronDown: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`,
+	chevronUp: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>`,
+	chevronRight: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`,
+	download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>`,
+	trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`,
+	edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+	check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+	close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+	dots: `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="5" cy="12" r="2"/></svg>`,
+	artist: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+	upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>`,
+	dice: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5" fill="currentColor"/><circle cx="15.5" cy="8.5" r="1.5" fill="currentColor"/><circle cx="8.5" cy="15.5" r="1.5" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>`,
+	sparkles: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>`,
+	spatial: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/><circle cx="12" cy="12" r="2"/></svg>`,
+	speedPill: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
+	volumeLow: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7"/></svg>`,
+	cinema: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg>`,
+	zap: `<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
+	speaker: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="20" x="4" y="2" rx="2"/><circle cx="12" cy="14" r="4"/><line x1="12" x2="12.01" y1="6" y2="6"/></svg>`,
+	keyboard: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.001M10 8h.001M14 8h.001M18 8h.001M8 12h.001M12 12h.001M16 12h.001M7 16h10"/></svg>`,
+	phone: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></svg>`,
+	windows: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.951-1.801"/></svg>`,
+	refresh: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>`,
+	externalLink: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`,
 };
 
 // ---------- App shell render ----------
@@ -1163,34 +1240,88 @@ function render() {
 				</div>
 				<div class="np-center">
 					<div class="np-buttons">
-						<button class="icon-btn" id="btn-shuffle" title="Shuffle">${icons.shuffle}</button>
-						<button class="icon-btn" id="btn-abloop" title="A-B Loop (B)">${icons.abLoop}</button>
-						<button class="icon-btn" id="btn-prev" title="Previous (Ctrl+←)">${icons.prev}</button>
-						<button class="icon-btn play-btn" id="btn-play" title="Play / pause (Space)"><span class="play-btn-inner">${icons.play}</span></button>
-						<button class="icon-btn" id="btn-next" title="Next (Ctrl+→)">${icons.next}</button>
-						<button class="icon-btn" id="btn-repeat" title="Repeat">${icons.repeat}</button>
+						<button class="icon-btn cel-btn" id="btn-shuffle" title="Shuffle">${icons.shuffle}<span class="smart-indicator"></span></button>
+						<button class="icon-btn cel-btn" id="btn-abloop" title="A-B Loop (B)">${icons.abLoop}</button>
+						<button class="icon-btn cel-btn" id="btn-prev" title="Previous (Ctrl+←)">${icons.prev}</button>
+						<button class="icon-btn play-btn cel-hero-btn" id="btn-play" title="Play / pause (Space)"><span class="play-btn-inner">${icons.play}</span></button>
+						<button class="icon-btn cel-btn" id="btn-next" title="Next (Ctrl+→)">${icons.next}</button>
+						<button class="icon-btn cel-btn" id="btn-repeat" title="Repeat">${icons.repeat}</button>
 					</div>
 					<div class="np-scrub">
 						<span class="np-time" id="np-current">0:00</span>
-						<div class="scrub" id="scrub" title="Click to seek">
+						<div class="scrub" id="scrub" title="Click or drag to seek">
+							<div class="scrub-waveform-glow" id="scrub-waveform-glow"></div>
+							<div class="scrub-loop-range" id="scrub-loop-range" style="display:none"></div>
 							<div class="scrub-fill" id="scrub-fill"></div>
 							<div class="scrub-handle" id="scrub-handle"></div>
-							<div class="scrub-lo-a" id="scrub-lo-a"></div>
-							<div class="scrub-lo-b" id="scrub-lo-b"></div>
+							<div class="scrub-lo-a" id="scrub-lo-a" data-label="A" style="display:none"></div>
+							<div class="scrub-lo-b" id="scrub-lo-b" data-label="B" style="display:none"></div>
+							<div class="scrub-tooltip" id="scrub-hover-tooltip">0:00</div>
 						</div>
 						<span class="np-time" id="np-duration">0:00</span>
 					</div>
 				</div>
 				<div class="np-right">
-					<button class="icon-btn" id="btn-eq-shortcut" data-tip="Equalizer" title="Equalizer">${icons.eq}</button>
-						<button class="icon-btn" id="btn-tray-shortcut" data-tip="Send to tray" title="Send to tray">${icons.tray}</button>
-						<button class="icon-btn" id="btn-mini-shortcut" data-tip="Mini player" title="Mini player">${icons.mini}</button>
-						<button class="icon-btn" id="btn-fullscreen" data-tip="Toggle fullscreen" title="Toggle fullscreen">${icons.maximize}</button>
-					<button class="icon-btn" id="btn-queue" data-tip="Open queue" title="Open queue">${icons.queue}</button>
+					<div class="np-audio-tweaks">
+						<button class="pill-btn speed-pill" id="btn-speed-selector" data-tip="Speed & Pitch Engine" title="Speed & Pitch Engine">
+							<span class="pill-icon">${icons.speedPill}</span>
+							<span class="pill-label" id="speed-pill-label">1.0×</span>
+						</button>
+						<button class="pill-btn boost-pill" id="btn-preamp-pill" data-tip="Pre-Amp Gain Booster" title="Pre-Amp Gain Booster">
+							<span class="boost-badge" id="preamp-badge">0dB</span>
+						</button>
+						<button class="icon-btn spatial-btn" id="btn-spatial-8d" data-tip="8D Spatial Surround (Binaural)" title="8D Spatial Surround">
+							<span class="spatial-rings"></span>
+							<span class="spatial-label">8D</span>
+						</button>
+						<button class="icon-btn viz-gradient-btn" id="btn-viz-gradient" data-tip="Visualizer Color Gradient" title="Visualizer Color Gradient">
+							${icons.palette}
+						</button>
+					</div>
+
+					<div class="np-quick-modes">
+						<button class="icon-btn cel-btn" id="btn-eq-shortcut" data-tip="Equalizer" title="Equalizer">${icons.eq}</button>
+						<button class="icon-btn cel-btn" id="btn-mini-shortcut" data-tip="Mini player" title="Mini player">${icons.mini}</button>
+						<button class="icon-btn cel-btn" id="btn-fullscreen" data-tip="Toggle Cinema Fullscreen" title="Toggle Cinema Fullscreen">${icons.cinema}</button>
+						<button class="icon-btn cel-btn" id="btn-queue" data-tip="Up Next Queue" title="Up Next Queue">${icons.queue}</button>
+					</div>
+
 					<div class="volume" title="Volume (↑ / ↓)">
 						<button class="icon-btn" id="btn-mute" data-tip="Mute (M)" style="padding:0">${icons.volume}</button>
 						<input type="range" id="volume" class="range" min="0" max="100" value="${Math.round(state.settings.volume * 100)}" title="Volume" />
 					</div>
+				</div>
+			</div>
+
+			<!-- Speed & Pitch Floating Popover -->
+			<div class="speed-popover hidden" id="speed-popover">
+				<div class="speed-popover-header">
+					<span class="popover-title">⚡ SPEED & PITCH</span>
+					<button class="speed-popover-close" id="speed-popover-close">✕</button>
+				</div>
+				<div class="speed-presets-grid">
+					<button class="speed-opt-btn" data-speed="0.5">0.5×</button>
+					<button class="speed-opt-btn" data-speed="0.75">0.75×</button>
+					<button class="speed-opt-btn active" data-speed="1.0">1.0×</button>
+					<button class="speed-opt-btn" data-speed="1.25">1.25×</button>
+					<button class="speed-opt-btn" data-speed="1.5">1.5×</button>
+					<button class="speed-opt-btn" data-speed="2.0">2.0×</button>
+				</div>
+				<div class="pitch-presets-row">
+					<button class="pitch-mode-btn nightcore" id="btn-mode-nightcore">
+						<span class="pitch-badge">⚡ NIGHTCORE</span>
+						<span class="pitch-sub">1.28× + High Pitch</span>
+					</button>
+					<button class="pitch-mode-btn lofi" id="btn-mode-lofi">
+						<span class="pitch-badge">🌙 LO-FI CHOP</span>
+						<span class="pitch-sub">0.84× + Deep Slow</span>
+					</button>
+				</div>
+				<div class="pitch-toggle-row">
+					<label class="toggle-label">
+						<input type="checkbox" id="pitch-preserve-toggle" ${state.settings.preservesPitch ? "checked" : ""} />
+						<span>Lock Pitch (Time Stretch)</span>
+					</label>
 				</div>
 			</div>
 		</section>
@@ -1211,51 +1342,38 @@ function render() {
 	mountStripVisualizer();
 }
 
-// Wire interactions on the video stage: single-click toggles play/pause and
-// flashes a centered indicator; double-click toggles window fullscreen.
+// Wire interactions on the video stage via VideoCinemaEngine
 function wireVideoStage() {
 	const mount = document.getElementById("video-mount");
-	const indicator = document.getElementById("video-indicator");
-	if (!mount) return;
-	let clickTimer: ReturnType<typeof setTimeout> | null = null;
-	mount.addEventListener("click", (e) => {
-		if ((e.target as HTMLElement).closest(".video-info")) return;
-		if (clickTimer) return; // wait for dblclick to decide
-		clickTimer = setTimeout(() => {
-			clickTimer = null;
-			engine.togglePlay();
-			if (indicator) {
-				indicator.classList.remove("flash");
-				// reflow to restart the animation
-				void indicator.offsetWidth;
-				indicator.dataset.icon = engine.paused ? "pause" : "play";
-				indicator.classList.add("flash");
-			}
-			engine.paused ? sfx.pause() : sfx.play();
-		}, 200);
-	});
-	mount.addEventListener("dblclick", async (e) => {
-		if ((e.target as HTMLElement).closest(".video-info")) return;
-		if ((e.target as HTMLElement).closest(".video-pip")) return;
-		if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
-		sfx.click();
-		try { await bun().windowToggleFullscreen({}); } catch {}
-	});
+	if (!mount || !state.currentTrack || state.currentTrack.kind !== "video") return;
 
-	document.getElementById("video-pip")?.addEventListener("click", async (e) => {
-		e.stopPropagation();
-		sfx.click();
-		try {
-			if (document.pictureInPictureElement) {
-				await document.exitPictureInPicture();
-			} else if ((videoEl as any).requestPictureInPicture) {
-				await (videoEl as any).requestPictureInPicture();
-			} else {
-				toast("Picture-in-picture isn't supported here.", { ttl: 2400 });
+	cinemaEngine.mount(mount, videoEl, engine, state.currentTrack, {
+		onToast: (msg, opts) => toast(msg, opts),
+		onTogglePlay: () => {
+			engine.togglePlay();
+			engine.paused ? sfx.pause() : sfx.play();
+		},
+		onSeek: (time) => {
+			engine.seek(time);
+		},
+		onPrevious: () => {
+			previous();
+		},
+		onNext: () => {
+			next();
+		},
+		onSetVolume: (vol) => {
+			state.settings.volume = vol;
+			engine.setVolume(vol);
+			const slider = document.getElementById("volume") as HTMLInputElement | null;
+			if (slider) {
+				slider.value = String(Math.round(vol * 100));
+				syncRangeFill(slider);
 			}
-		} catch (err) {
-			toast(`PiP failed: ${(err as Error).message}`, { ttl: 3000 });
-		}
+		},
+		onToggleFullscreen: async () => {
+			try { await bun().windowToggleFullscreen({}); } catch {}
+		},
 	});
 }
 
@@ -1293,6 +1411,11 @@ function mountStripVisualizer() {
 		idle: state.settings.idleViz,
 		autoStart: !engine.paused,
 	});
+	stripViz.setGradient(state.settings.stripGradient);
+	const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(state.settings.accent);
+	if (m) {
+		stripViz.setAccent([parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)]);
+	}
 }
 
 // Single point that pushes the user's perf settings to whichever visualizers
@@ -1414,6 +1537,67 @@ function navigate(v: View) {
 	renderMain();
 }
 
+let isDraggingScrub = false;
+
+function applyPlaybackRate() {
+	let rate = state.settings.speed;
+	let preserve = state.settings.preservesPitch;
+	if (state.settings.pitchMode === "nightcore") {
+		rate = 1.28;
+		preserve = false;
+	} else if (state.settings.pitchMode === "lofi") {
+		rate = 0.84;
+		preserve = false;
+	}
+	engineA.setRate(rate, preserve);
+	engineB.setRate(rate, preserve);
+	videoEngine.setRate(rate, preserve);
+	updateSpeedPillUI();
+}
+
+function updateSpeedPillUI() {
+	const pillLabel = document.getElementById("speed-pill-label");
+	if (!pillLabel) return;
+	if (state.settings.pitchMode === "nightcore") {
+		pillLabel.textContent = "⚡ 1.28×";
+	} else if (state.settings.pitchMode === "lofi") {
+		pillLabel.textContent = "🌙 0.84×";
+	} else {
+		pillLabel.textContent = `${state.settings.speed.toFixed(2).replace(/\.?0+$/, "")}×`;
+	}
+}
+
+function applySpatialAudio() {
+	const on = state.settings.spatial8D;
+	engineA.setSpatial8D(on);
+	engineB.setSpatial8D(on);
+	videoEngine.setSpatial8D(on);
+	const btn = document.getElementById("btn-spatial-8d");
+	if (btn) btn.classList.toggle("active", on);
+}
+
+function updateVolumeIcon(v: number) {
+	const btn = document.getElementById("btn-mute");
+	if (!btn) return;
+	if (v === 0) {
+		btn.innerHTML = icons.mute;
+	} else if (v < 0.35) {
+		btn.innerHTML = icons.volumeLow;
+	} else {
+		btn.innerHTML = icons.volume;
+	}
+}
+
+function updatePreampUI() {
+	const pill = document.getElementById("btn-preamp-pill");
+	const badge = document.getElementById("preamp-badge");
+	if (!pill || !badge) return;
+	const db = Math.round(state.settings.preAmp);
+	badge.textContent = db > 0 ? `+${db}dB` : `${db}dB`;
+	pill.classList.toggle("boosted", db > 0);
+	pill.setAttribute("title", `Pre-Amp Gain Booster: ${db > 0 ? `+${db}dB (Overdrive Boost)` : "0dB (Standard)"}`);
+}
+
 // ---------- Transport ----------
 function wireTransport() {
 	const btnPlay = document.getElementById("btn-play")!;
@@ -1448,7 +1632,7 @@ function wireTransport() {
 		applyShuffleVisuals();
 		toast(
 			state.settings.shuffle
-				? state.settings.smartShuffle ? "Smart shuffle on" : "Shuffle on"
+				? state.settings.smartShuffle ? "Smart shuffle on (Weighted & Recency)" : "Shuffle on (Random)"
 				: "Shuffle off",
 			{ ttl: 1500 },
 		);
@@ -1460,7 +1644,32 @@ function wireTransport() {
 		btnRepeat.classList.toggle("active", state.settings.repeat !== "off");
 		sfx.toggle();
 		saveSettings();
-		toast(`Repeat: ${state.settings.repeat}`, { ttl: 1500 });
+		toast(`Repeat: ${state.settings.repeat.toUpperCase()}`, { ttl: 1500 });
+	});
+	btnAbloop.addEventListener("click", () => {
+		const cur = engine.currentTime;
+		const dur = engine.duration;
+		if (!state.abLoop) {
+			state.abLoop = { a: cur, b: dur > 0 ? dur : Infinity };
+			toast(`A-B Loop [A] set: ${formatTime(cur)}`, { ttl: 1800, key: "abloop" });
+		} else if (state.abLoop.b >= dur) {
+			state.abLoop = { a: state.abLoop.a, b: cur };
+			toast(`A-B Loop [A→B] locked: ${formatTime(state.abLoop.a)} → ${formatTime(cur)}`, { ttl: 2000, key: "abloop" });
+		} else {
+			state.abLoop = null;
+			engineA.setABLoop(null);
+			engineB.setABLoop(null);
+			videoEngine.setABLoop(null);
+			toast("A-B Loop cleared", { ttl: 1500, key: "abloop" });
+		}
+		if (state.abLoop) {
+			engineA.setABLoop(state.abLoop);
+			engineB.setABLoop(state.abLoop);
+			videoEngine.setABLoop(state.abLoop);
+		}
+		updateLoopMarkers();
+		saveAbLoop();
+		sfx.toggle();
 	});
 	btnQueue.addEventListener("click", () => {
 		state.queueOpen = !state.queueOpen;
@@ -1479,14 +1688,155 @@ function wireTransport() {
 		sfx.click();
 		navigate("equalizer");
 	});
-	document.getElementById("btn-tray-shortcut")?.addEventListener("click", async () => {
-		sfx.click();
-		try { await bun().sendToTray({}); } catch {}
-	});
 	document.getElementById("btn-mini-shortcut")?.addEventListener("click", async () => {
 		sfx.click();
 		try { await bun().openMiniPlayer({}); } catch {}
 	});
+
+	// Pre-amp booster pill (+6dB / +12dB)
+	const btnPreamp = document.getElementById("btn-preamp-pill");
+	if (btnPreamp) {
+		btnPreamp.addEventListener("click", () => {
+			const cycle = [0, 6, 12];
+			const curDb = Math.round(state.settings.preAmp);
+			const nextDb = cycle[(cycle.indexOf(curDb) + 1) % cycle.length];
+			state.settings.preAmp = nextDb;
+			engineA.setPreAmp(nextDb);
+			engineB.setPreAmp(nextDb);
+			videoEngine.setPreAmp(nextDb);
+			updatePreampUI();
+			saveSettings();
+			sfx.toggle();
+			toast(nextDb > 0 ? `⚡ Pre-Amp Boost: +${nextDb}dB Overdrive` : "Pre-Amp Gain: 0dB Standard", { ttl: 1800 });
+		});
+	}
+	updatePreampUI();
+
+	// 8D Spatial Audio quick button
+	const btnSpatial = document.getElementById("btn-spatial-8d");
+	if (btnSpatial) {
+		btnSpatial.addEventListener("click", () => {
+			state.settings.spatial8D = !state.settings.spatial8D;
+			applySpatialAudio();
+			saveSettings();
+			sfx.toggle();
+			toast(
+				state.settings.spatial8D
+					? "🎧 8D Spatial Audio: Enabled (Binaural Orbit)"
+					: "8D Spatial Audio: Disabled",
+				{ ttl: 2000 },
+			);
+		});
+	}
+	applySpatialAudio();
+
+	// Spectrum gradient palette cycler
+	const btnVizGradient = document.getElementById("btn-viz-gradient");
+	if (btnVizGradient) {
+		const gradientCycle: AnimeGradient[] = [
+			"cyber_neon",
+			"sakura_sunset",
+			"ghibli_emerald",
+			"midnight_shogun",
+			"synthwave_sunset",
+			"ocean_shinkai",
+			"default",
+		];
+		btnVizGradient.addEventListener("click", () => {
+			const curIdx = gradientCycle.indexOf(state.settings.stripGradient);
+			const nextGrad = gradientCycle[(curIdx + 1) % gradientCycle.length];
+			state.settings.stripGradient = nextGrad;
+			stripViz?.setGradient(nextGrad);
+			saveSettings();
+			sfx.click();
+			const info = ANIME_GRADIENTS[nextGrad];
+			toast(`🎨 Spectrum Gradient: ${info ? info.name : nextGrad}`, { ttl: 1800 });
+		});
+	}
+
+	// Speed & Pitch popover
+	const btnSpeed = document.getElementById("btn-speed-selector");
+	const speedPopover = document.getElementById("speed-popover");
+	const speedClose = document.getElementById("speed-popover-close");
+	const pitchPreserveToggle = document.getElementById("pitch-preserve-toggle") as HTMLInputElement | null;
+
+	if (btnSpeed && speedPopover) {
+		btnSpeed.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const isHidden = speedPopover.classList.contains("hidden");
+			speedPopover.classList.toggle("hidden", !isHidden);
+			btnSpeed.classList.toggle("active", isHidden);
+			sfx.click();
+		});
+		speedClose?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			speedPopover.classList.add("hidden");
+			btnSpeed.classList.remove("active");
+		});
+		document.addEventListener("click", (e) => {
+			if (!speedPopover.classList.contains("hidden") && !speedPopover.contains(e.target as Node) && e.target !== btnSpeed) {
+				speedPopover.classList.add("hidden");
+				btnSpeed.classList.remove("active");
+			}
+		});
+
+		// Preset buttons
+		for (const opt of speedPopover.querySelectorAll<HTMLButtonElement>(".speed-opt-btn")) {
+			opt.addEventListener("click", () => {
+				const sp = parseFloat(opt.dataset.speed || "1.0");
+				state.settings.speed = sp;
+				state.settings.pitchMode = "normal";
+				applyPlaybackRate();
+				saveSettings();
+				sfx.click();
+				toast(`Speed: ${sp}×`, { ttl: 1400 });
+				for (const o of speedPopover.querySelectorAll(".speed-opt-btn")) o.classList.remove("active");
+				opt.classList.add("active");
+				speedPopover.querySelectorAll(".pitch-mode-btn").forEach((b) => b.classList.remove("active"));
+			});
+		}
+
+		// Nightcore mode
+		document.getElementById("btn-mode-nightcore")?.addEventListener("click", () => {
+			state.settings.pitchMode = "nightcore";
+			state.settings.speed = 1.28;
+			state.settings.preservesPitch = false;
+			applyPlaybackRate();
+			saveSettings();
+			sfx.play();
+			toast("⚡ Nightcore Mode Active (1.28× + High Pitch)", { ttl: 2200 });
+			speedPopover.querySelectorAll(".speed-opt-btn").forEach((b) => b.classList.remove("active"));
+			speedPopover.querySelectorAll(".pitch-mode-btn").forEach((b) => b.classList.remove("active"));
+			document.getElementById("btn-mode-nightcore")?.classList.add("active");
+			if (pitchPreserveToggle) pitchPreserveToggle.checked = false;
+		});
+
+		// Lo-Fi mode
+		document.getElementById("btn-mode-lofi")?.addEventListener("click", () => {
+			state.settings.pitchMode = "lofi";
+			state.settings.speed = 0.84;
+			state.settings.preservesPitch = false;
+			applyPlaybackRate();
+			saveSettings();
+			sfx.play();
+			toast("🌙 Lo-Fi Chop Mode Active (0.84× + Deep Slow Pitch)", { ttl: 2200 });
+			speedPopover.querySelectorAll(".speed-opt-btn").forEach((b) => b.classList.remove("active"));
+			speedPopover.querySelectorAll(".pitch-mode-btn").forEach((b) => b.classList.remove("active"));
+			document.getElementById("btn-mode-lofi")?.classList.add("active");
+			if (pitchPreserveToggle) pitchPreserveToggle.checked = false;
+		});
+
+		if (pitchPreserveToggle) {
+			pitchPreserveToggle.addEventListener("change", () => {
+				state.settings.preservesPitch = pitchPreserveToggle.checked;
+				if (state.settings.pitchMode !== "normal") state.settings.pitchMode = "normal";
+				applyPlaybackRate();
+				saveSettings();
+				sfx.toggle();
+			});
+		}
+	}
+	updateSpeedPillUI();
 
 	applyShuffleVisuals();
 	if (state.settings.repeat !== "off") {
@@ -1496,10 +1846,14 @@ function wireTransport() {
 
 	const vol = document.getElementById("volume")! as HTMLInputElement;
 	syncRangeFill(vol);
+	updateVolumeIcon(state.settings.volume);
 	vol.addEventListener("input", () => {
 		const v = parseInt(vol.value, 10) / 100;
 		state.settings.volume = v;
-		engine.setVolume(v);
+		engineA.setVolume(v);
+		engineB.setVolume(v);
+		videoEngine.setVolume(v);
+		updateVolumeIcon(v);
 		syncRangeFill(vol);
 		saveSettings();
 	});
@@ -1510,39 +1864,117 @@ function wireTransport() {
 			const cur = state.settings.volume;
 			if (cur > 0) {
 				state.mutedVolume = cur;
-				engine.setVolume(0);
+				state.settings.volume = 0;
+				engineA.setVolume(0);
+				engineB.setVolume(0);
+				videoEngine.setVolume(0);
 				vol.value = "0";
-				btnMute.innerHTML = icons.mute;
+				updateVolumeIcon(0);
 				sfx.toggle();
 			} else {
 				const restore = state.mutedVolume || 0.85;
 				state.settings.volume = restore;
-				engine.setVolume(restore);
+				engineA.setVolume(restore);
+				engineB.setVolume(restore);
+				videoEngine.setVolume(restore);
 				vol.value = String(Math.round(restore * 100));
-				btnMute.innerHTML = icons.volume;
+				updateVolumeIcon(restore);
 				sfx.toggle();
 			}
 			syncRangeFill(vol);
 			saveSettings();
 		});
 	}
-	// Sync any other .range slider that the views have already mounted.
-	for (const r of document.querySelectorAll<HTMLInputElement>(".range")) syncRangeFill(r);
 
+	// Interactive Scrubber with smooth dragging and floating hover timestamp pill
 	const scrub = document.getElementById("scrub")!;
-	scrub.addEventListener("click", (e) => {
+	const scrubFill = document.getElementById("scrub-fill") as HTMLDivElement | null;
+	const scrubHandle = document.getElementById("scrub-handle") as HTMLDivElement | null;
+	const scrubTooltip = document.getElementById("scrub-hover-tooltip") as HTMLDivElement | null;
+	const curTimeEl = document.getElementById("np-current");
+
+	function handleScrubMove(clientX: number, commitSeek = false) {
 		const rect = scrub.getBoundingClientRect();
-		const ratio = (e.clientX - rect.left) / rect.width;
-		if (engine.duration > 0) {
-			engine.seek(engine.duration * Math.max(0, Math.min(1, ratio)));
+		if (rect.width <= 0) return;
+		const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+		const dur = engine.duration;
+		const targetSec = dur > 0 ? ratio * dur : 0;
+		const pct = ratio * 100;
+
+		if (scrubFill) scrubFill.style.width = `${pct}%`;
+		if (scrubHandle) scrubHandle.style.left = `${pct}%`;
+		if (scrubTooltip) {
+			scrubTooltip.textContent = `${formatTime(targetSec)}${dur > 0 ? ` / ${formatTime(dur)}` : ""}`;
+			scrubTooltip.style.left = `${pct}%`;
+		}
+		if (curTimeEl && isDraggingScrub) {
+			curTimeEl.textContent = formatTime(targetSec);
+		}
+		if (commitSeek && dur > 0) {
+			engine.seek(targetSec);
+		}
+	}
+
+	scrub.addEventListener("pointerdown", (e) => {
+		if (e.button !== 0) return;
+		isDraggingScrub = true;
+		scrub.setPointerCapture(e.pointerId);
+		scrub.classList.add("dragging");
+		if (scrubTooltip) scrubTooltip.classList.add("visible");
+		handleScrubMove(e.clientX, false);
+		sfx.click();
+	});
+
+	scrub.addEventListener("pointermove", (e) => {
+		const rect = scrub.getBoundingClientRect();
+		if (rect.width <= 0) return;
+		const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+		const dur = engine.duration;
+		const targetSec = dur > 0 ? ratio * dur : 0;
+		const pct = ratio * 100;
+
+		if (scrubTooltip) {
+			scrubTooltip.textContent = `${formatTime(targetSec)}${dur > 0 ? ` / ${formatTime(dur)}` : ""}`;
+			scrubTooltip.style.left = `${pct}%`;
+		}
+		if (isDraggingScrub) {
+			handleScrubMove(e.clientX, false);
 		}
 	});
 
-	for (const b of document.querySelectorAll<HTMLButtonElement>(".icon-btn")) {
+	scrub.addEventListener("pointerup", (e) => {
+		if (!isDraggingScrub) return;
+		isDraggingScrub = false;
+		try { scrub.releasePointerCapture(e.pointerId); } catch {}
+		scrub.classList.remove("dragging");
+		if (scrubTooltip) scrubTooltip.classList.remove("visible");
+		handleScrubMove(e.clientX, true);
+	});
+
+	scrub.addEventListener("pointercancel", (e) => {
+		if (!isDraggingScrub) return;
+		isDraggingScrub = false;
+		try { scrub.releasePointerCapture(e.pointerId); } catch {}
+		scrub.classList.remove("dragging");
+		if (scrubTooltip) scrubTooltip.classList.remove("visible");
+	});
+
+	scrub.addEventListener("pointerenter", () => {
+		if (scrubTooltip) scrubTooltip.classList.add("visible");
+	});
+
+	scrub.addEventListener("pointerleave", () => {
+		if (!isDraggingScrub && scrubTooltip) {
+			scrubTooltip.classList.remove("visible");
+		}
+	});
+
+	for (const b of document.querySelectorAll<HTMLButtonElement>(".icon-btn, .pill-btn")) {
 		b.addEventListener("mouseenter", () => sfx.hover());
 	}
 
 	engine.setVolume(state.settings.volume);
+	updateLoopMarkers();
 }
 
 function updatePlayButton(isPlaying: boolean) {
@@ -1576,6 +2008,15 @@ function applyShuffleVisuals() {
 
 function updateNowPlayingArtSpin(spinning: boolean) {
 	document.getElementById("np-art")?.classList.toggle("playing", spinning && !usingVideo);
+	const stage = document.getElementById("np-cel-stage");
+	const disc = document.getElementById("np-vinyl-disc");
+	if (stage) {
+		stage.classList.toggle("is-playing", spinning && !usingVideo);
+		stage.classList.toggle("is-paused", !spinning || usingVideo);
+	}
+	if (disc) {
+		disc.classList.toggle("spinning", spinning && !usingVideo);
+	}
 }
 
 function updateNowPlayingProgress(cur: number, dur: number) {
@@ -1584,10 +2025,23 @@ function updateNowPlayingProgress(cur: number, dur: number) {
 	const c = document.getElementById("np-current");
 	const d = document.getElementById("np-duration");
 	const ratio = dur > 0 ? cur / dur : 0;
-	if (f) f.style.width = `${ratio * 100}%`;
-	if (handle) handle.style.left = `${ratio * 100}%`;
-	if (c) c.textContent = formatTime(cur);
+	if (!isDraggingScrub) {
+		if (f) f.style.width = `${ratio * 100}%`;
+		if (handle) handle.style.left = `${ratio * 100}%`;
+		if (c) c.textContent = formatTime(cur);
+	}
 	if (d && dur > 0) d.textContent = formatTime(dur);
+
+	// Ambient waveform glow pulse on scrubber track
+	const glow = document.getElementById("scrub-waveform-glow");
+	if (glow) {
+		glow.style.opacity = engine.paused ? "0.2" : `${0.35 + Math.sin(cur * 3) * 0.15}`;
+	}
+
+	if (state.view === "nowplaying") {
+		updateKaraokeLyrics(cur);
+		updateStageAudioPulse();
+	}
 
 	// Sleep timer
 	if (state.sleepTimerEndsAt > 0 && Date.now() >= state.sleepTimerEndsAt) {
@@ -1603,22 +2057,43 @@ function updateNowPlayingProgress(cur: number, dur: number) {
 function updateLoopMarkers() {
 	const f = document.getElementById("scrub-lo-a");
 	const g = document.getElementById("scrub-lo-b");
-	if (!f || !g) return;
+	const range = document.getElementById("scrub-loop-range");
+	const btnAbloop = document.getElementById("btn-abloop");
 	const dur = engine.duration;
+
 	if (!state.abLoop || dur <= 0) {
-		f.style.display = "none";
-		g.style.display = "none";
+		if (f) f.style.display = "none";
+		if (g) g.style.display = "none";
+		if (range) range.style.display = "none";
+		btnAbloop?.classList.remove("active");
 		return;
 	}
-	const aPct = (state.abLoop.a / dur) * 100;
-	f.style.display = "";
-	f.style.left = `${aPct}%`;
+
+	btnAbloop?.classList.add("active");
+	const aPct = Math.max(0, Math.min(100, (state.abLoop.a / dur) * 100));
+	if (f) {
+		f.style.display = "flex";
+		f.style.left = `${aPct}%`;
+	}
+
 	if (state.abLoop.b < dur) {
-		const bPct = (state.abLoop.b / dur) * 100;
-		g.style.display = "";
-		g.style.left = `${bPct}%`;
+		const bPct = Math.max(0, Math.min(100, (state.abLoop.b / dur) * 100));
+		if (g) {
+			g.style.display = "flex";
+			g.style.left = `${bPct}%`;
+		}
+		if (range) {
+			range.style.display = "block";
+			range.style.left = `${aPct}%`;
+			range.style.width = `${Math.max(0, bPct - aPct)}%`;
+		}
 	} else {
-		g.style.display = "none";
+		if (g) g.style.display = "none";
+		if (range) {
+			range.style.display = "block";
+			range.style.left = `${aPct}%`;
+			range.style.width = `${100 - aPct}%`;
+		}
 	}
 }
 
@@ -1723,7 +2198,8 @@ async function playCurrent() {
 
 	engine.setVolume(state.settings.volume);
 	engine.setEq(state.settings.eq);
-	engine.setRate(state.settings.speed);
+	applyPlaybackRate();
+	applySpatialAudio();
 	engine.setPreAmp(state.settings.preAmp);
 
 	// ReplayGain
@@ -1754,10 +2230,10 @@ async function playCurrent() {
 	// loop with a slight delay gives the context a second (and third) chance
 	// to wake up — without it, the next track loads silently and the pause
 	// button flips to "play" even though nothing is audible.
-	if (sharedAudioCtx.state !== "running") {
+	if ((sharedAudioCtx.state as string) !== "running") {
 		for (let attempt = 0; attempt < 3; attempt++) {
 			try { await sharedAudioCtx.resume(); } catch {}
-			if (sharedAudioCtx.state === "running") break;
+			if ((sharedAudioCtx.state as string) === "running") break;
 			await new Promise((r) => setTimeout(r, 100));
 		}
 	}
@@ -1925,10 +2401,15 @@ function highlightPlayingRow() {
 
 // Theme presets — each maps to a fallback accent color and a backdrop tint.
 const THEMES: Record<Settings["theme"], { accent: string; bg: string }> = {
-	midnight: { accent: "#a78bfa", bg: "rgba(167, 139, 250, 0.18)" },
-	aurora:   { accent: "#22d3ee", bg: "rgba(34, 211, 238, 0.18)" },
-	solar:    { accent: "#fb923c", bg: "rgba(251, 146, 60, 0.18)" },
-	rose:     { accent: "#f472b6", bg: "rgba(244, 114, 182, 0.18)" },
+	midnight:        { accent: "#a78bfa", bg: "rgba(167, 139, 250, 0.18)" },
+	aurora:          { accent: "#22d3ee", bg: "rgba(34, 211, 238, 0.18)" },
+	solar:           { accent: "#fb923c", bg: "rgba(251, 146, 60, 0.18)" },
+	rose:            { accent: "#f472b6", bg: "rgba(244, 114, 182, 0.18)" },
+	sakura_sunset:   { accent: "#f08092", bg: "rgba(240, 128, 146, 0.18)" },
+	cyber_neotokyo:  { accent: "#00ffff", bg: "rgba(0, 255, 255, 0.18)" },
+	ghibli_emerald:  { accent: "#4ade80", bg: "rgba(74, 222, 128, 0.18)" },
+	ocean_shinkai:   { accent: "#00d2ff", bg: "rgba(0, 210, 255, 0.18)" },
+	midnight_shogun: { accent: "#eab308", bg: "rgba(234, 179, 8, 0.18)" },
 };
 
 function applyTheme() {
@@ -2048,23 +2529,26 @@ async function updatePresenceImmediate() {
 	// album art needs a public HTTPS URL. The main process resolves one via
 	// iTunes Search and persists the result forever — so each album is only
 	// ever looked up once and subsequent plays are zero-network.
+	const is8D = state.nodeGraph ? true : false;
+	const detailsPrefix = is8D ? "🎧 " : "🌸 ";
 	const presence: DiscordPresence = {
-		details: t.title.slice(0, 120),
-		state: paused ? `Paused • ${t.artist}` : t.artist,
+		details: `${detailsPrefix}${t.title}`.slice(0, 120),
+		state: (paused ? `⏸ Paused • ${t.artist}` : `${t.artist}${t.album ? ` — ${t.album}` : ""}`).slice(0, 120),
 		largeImageKey: "lak_logo",
-		largeImageText: `${t.album} — Lakky`,
+		largeImageText: `${t.album || t.title} • Lakky Player v1.3.0`,
 		smallImageKey: paused ? "pause" : "play",
-		smallImageText: paused ? "Paused" : "Playing",
+		smallImageText: paused ? "⏸ Paused" : "▶ Playing on Lakky",
 		artist: t.artist,
 		album: t.album,
 		buttons: [
-			{ label: "Player", url: "https://lakky.app" },
+			{ label: "🌸 Get Lakky Player", url: "https://github.com/Laknicek/lakky" },
+			{ label: "✨ Download Releases", url: "https://github.com/Laknicek/lakky/releases" },
 		],
 	};
 	if (!paused && engine.duration > 0) {
-		const remaining = (engine.duration - engine.currentTime) * 1000;
-		presence.startTimestamp = Math.floor(Date.now() / 1000);
-		presence.endTimestamp = Math.floor((Date.now() + remaining) / 1000);
+		const elapsed = engine.currentTime;
+		presence.startTimestamp = Math.floor((Date.now() - elapsed * 1000) / 1000);
+		presence.endTimestamp = Math.floor((Date.now() + (engine.duration - elapsed) * 1000) / 1000);
 	}
 	try {
 		await bun().setDiscordPresence({ presence });
@@ -2077,12 +2561,12 @@ function renderMain() {
 	// upcoming innerHTML assignment doesn't take it down with it.
 	parkVideoEl();
 	closeCtxMenu();
-	// The big Now Playing visualizer is per-view: when we navigate away its
-	// canvas is removed from the DOM, so kill the instance to stop the rAF
-	// loop and free the analyser tap.
-	if (state.view !== "nowplaying" && visualizer) {
-		visualizer.destroy();
-		visualizer = null;
+	if (state.view !== "nowplaying") {
+		if (visualizer) {
+			visualizer.destroy();
+			visualizer = null;
+		}
+		cinemaEngine.unmount();
 	}
 	const main = document.getElementById("main")!;
 	switch (state.view) {
@@ -2188,53 +2672,225 @@ function renderHome(root: HTMLElement) {
 	wireSearch();
 }
 
-function renderLibrary(root: HTMLElement) {
-	const q = state.searchQuery.toLowerCase().trim();
-	const tracks = (q
-		? state.library.filter((t) =>
-			[t.title, t.artist, t.album].some((s) => s.toLowerCase().includes(q)))
-		: [...state.library])
-		.sort((a, b) => {
-			switch (state.librarySort) {
-				case "artist": return a.artist.localeCompare(b.artist) || a.album.localeCompare(b.album);
-				case "album": return a.album.localeCompare(b.album) || (a.trackNumber ?? 0) - (b.trackNumber ?? 0);
-				case "duration": return (b.duration ?? 0) - (a.duration ?? 0);
-				case "year": return (b.year ?? 0) - (a.year ?? 0) || a.artist.localeCompare(b.artist);
-				default: return a.title.localeCompare(b.title) || a.artist.localeCompare(b.artist);
-			}
-		});
+// ---------- Track Codec, Metadata & Filter Helpers ----------
+function getCodecInfo(t: TrackInfo): { label: string; isHiRes: boolean; html: string } {
+	const ext = t.path ? t.path.split(".").pop()?.toUpperCase() ?? "" : "";
+	const format = (t.verifiedFormat || ext || (t.kind === "video" ? "VIDEO" : "AUDIO")).toUpperCase();
+	const sampleKhz = t.sampleRate ? Math.round(t.sampleRate / 1000) : 0;
+	const kbps = t.bitrate ? Math.round(t.bitrate / 1000) : 0;
+	const isHiRes = ["FLAC", "ALAC", "WAV", "DSD"].includes(format) || sampleKhz >= 48 || kbps >= 800;
 
-	root.innerHTML = `
-		<div class="topbar">
-			<h2>Library</h2>
-			<div class="topbar-actions">
-				<div class="search-wrap">
-					${icons.search}
-					<input class="search" id="search-input" placeholder="Search your library…" value="${escapeHtml(state.searchQuery)}" />
+	let label = format;
+	if (sampleKhz >= 48) label += ` ${sampleKhz}k`;
+	else if (kbps > 0) label += ` ${kbps}k`;
+
+	let html = "";
+	if (isHiRes) {
+		html = `<span class="badge-codec hires" title="Hi-Res Lossless Audio (${sampleKhz ? `${sampleKhz}kHz ` : ""}${kbps ? `${kbps}kbps` : ""})"><span class="hires-dot"></span>HI-RES</span> <span class="badge-codec flac">${escapeHtml(format)}</span>`;
+	} else if (t.kind === "video") {
+		html = `<span class="badge-codec video" title="Video Media">${icons.video} <span>${escapeHtml(format)}</span></span>`;
+	} else {
+		html = `<span class="badge-codec lossy" title="${sampleKhz ? `${sampleKhz}kHz ` : ""}${kbps ? `${kbps}kbps` : ""}">${escapeHtml(format)}${kbps ? ` ${kbps}k` : ""}</span>`;
+	}
+
+	return { label, isHiRes, html };
+}
+
+function isHiResLossless(t: TrackInfo): boolean {
+	const ext = t.path ? t.path.split(".").pop()?.toUpperCase() ?? "" : "";
+	const format = (t.verifiedFormat || ext || "").toUpperCase();
+	const sampleKhz = t.sampleRate ? Math.round(t.sampleRate / 1000) : 0;
+	const kbps = t.bitrate ? Math.round(t.bitrate / 1000) : 0;
+	return ["FLAC", "ALAC", "WAV", "DSD"].includes(format) || sampleKhz >= 48 || kbps >= 800;
+}
+
+function isAnimeTrack(t: TrackInfo): boolean {
+	const text = `${t.title} ${t.artist} ${t.album} ${t.genre ?? ""} ${t.path}`.toLowerCase();
+	const animeKeywords = [
+		"anime", "ost", "soundtrack", "japanese", "j-pop", "jpop", "vocaloid", "touhou",
+		"yoasobi", "lisa", "radwimps", "ado", "eve", "aimer", "sawano", "ghibli",
+		"monogatari", "k-on", "naruto", "bleach", "evangelion", "suzume", "your name",
+		"op", "ed", "theme", "bgm", "miku", "chihara", "myth & roid", "re:zero", "chainsaw",
+		"jujutsu", "frieren", "bocchi", "oshi no ko", "attack on titan", "shingeki"
+	];
+	const hasJapaneseChars = /[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uff9f\u4e00-\u9faf\u3400-\u4dbf]/.test(text);
+	return hasJapaneseChars || animeKeywords.some((k) => text.includes(k));
+}
+
+function isFavoriteTrack(t: TrackInfo): boolean {
+	return (state.ratings[t.id] ?? 0) >= 4;
+}
+
+function isRecentlyAdded(t: TrackInfo): boolean {
+	const idx = state.library.findIndex((x) => x.id === t.id);
+	return idx >= 0 && idx >= state.library.length - 30;
+}
+
+function formatDurationSum(tracks: TrackInfo[]): string {
+	const totalSec = tracks.reduce((acc, t) => acc + (t.duration ?? 0), 0);
+	const hrs = Math.floor(totalSec / 3600);
+	const mins = Math.floor((totalSec % 3600) / 60);
+	if (hrs > 0) return `${hrs}h ${mins}m`;
+	return `${mins} min`;
+}
+
+function getInitials(name: string): string {
+	return name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "♪";
+}
+
+// ---------- Cel-Shaded Track List Table ----------
+function trackRow(t: TrackInfo, i: number, opts?: { hideAlbumColumn?: boolean; playlistContext?: string }) {
+	const isPlaying = state.currentTrack?.id === t.id;
+	const isSelected = state.selectedIds.has(t.id);
+	const isVideo = t.kind === "video";
+	const isFav = isFavoriteTrack(t);
+	const plays = state.playStats[t.id] ?? 0;
+	const codec = getCodecInfo(t);
+	
+	const isThreat = (t.securityThreats && t.securityThreats.length > 0) || (t.securityScore !== undefined && t.securityScore < 80);
+	const secScore = t.securityScore ?? 100;
+	const secBadge = isThreat
+		? `<span class="badge-security threat" title="Security alert: Threat signature detected (${secScore}/100)">${icons.shieldAlert} Alert</span>`
+		: `<span class="badge-security safe" title="Verified clean binary & metadata (${secScore}/100)">${icons.shieldCheck} Safe</span>`;
+
+	const playsBadge = plays > 15
+		? `<span class="badge-plays hot" title="${plays} plays">${icons.flame} ${plays}</span>`
+		: plays > 0
+			? `<span class="badge-plays" title="${plays} plays">${plays}</span>`
+			: `<span class="badge-plays dim">—</span>`;
+
+	return `
+		<div class="cel-track-row track-row ${isPlaying ? "is-playing" : ""} ${isSelected ? "is-selected" : ""}" data-id="${t.id}" ${opts?.playlistContext ? `data-pl-ctx="${escapeHtml(opts.playlistContext)}"` : ""}>
+			<div class="col-check" onclick="event.stopPropagation()">
+				<input type="checkbox" class="row-checkbox" ${isSelected ? "checked" : ""} data-id="${t.id}" />
+			</div>
+			<div class="col-num">
+				${isPlaying && !engine.paused ? `
+					<div class="eq-bars-anim" title="Playing">
+						<span></span><span></span><span></span>
+					</div>
+				` : `
+					<span class="row-num-text">${i + 1}</span>
+					<button class="row-play-btn" title="Play ${escapeHtml(t.title)}">${icons.play}</button>
+				`}
+			</div>
+			<div class="col-title">
+				<div class="row-art-thumb">
+					${t.artDataUrl ? `<img src="${t.artDataUrl}" alt="" loading="lazy" />` : `<div class="row-art-placeholder">${isVideo ? icons.video : icons.musicNote}</div>`}
 				</div>
-				<button class="btn" id="btn-add-files">${icons.plus}<span>Add files</span></button>
-				<button class="btn btn-primary" id="btn-add-folder">${icons.folder}<span>Add folder</span></button>
-				<select class="select" id="lib-sort" style="min-width:90px;flex-shrink:0">
-					${(["title","artist","album","duration","year"] as const).map((k) => `<option value="${k}" ${state.librarySort === k ? "selected" : ""}>${k[0].toUpperCase() + k.slice(1)}</option>`).join("")}
-				</select>
+				<div class="row-title-meta">
+					<div class="row-title-text" title="${escapeHtml(t.title)}">
+						${isVideo ? `<span class="kind-badge inline">VIDEO</span> ` : ""}
+						${escapeHtml(t.title)}
+					</div>
+					<div class="row-artist-sub" title="${escapeHtml(t.artist)}">${escapeHtml(t.artist)}</div>
+				</div>
+			</div>
+			<div class="col-artist" title="${escapeHtml(t.artist)}">
+				<span class="artist-link" data-artist="${escapeHtml(t.artist)}">${escapeHtml(t.artist)}</span>
+			</div>
+			${opts?.hideAlbumColumn ? "" : `
+				<div class="col-album" title="${escapeHtml(t.album)}">
+					<span class="album-link" data-album="${escapeHtml(t.album)}">${escapeHtml(t.album)}</span>
+				</div>
+			`}
+			<div class="col-duration">${formatTime(t.duration)}</div>
+			<div class="col-codec">${codec.html}</div>
+			<div class="col-safety">${secBadge}</div>
+			<div class="col-plays">${playsBadge}</div>
+			<div class="col-actions" onclick="event.stopPropagation()">
+				<button class="row-fav-btn ${isFav ? "active" : ""}" data-fav-id="${t.id}" title="${isFav ? "Favorited" : "Add to favorites"}">
+					${isFav ? icons.heartFill : icons.heart}
+				</button>
+				${opts?.playlistContext ? `
+					<button class="row-remove-pl-btn" data-rem-pl="${escapeHtml(opts.playlistContext)}" data-rem-id="${t.id}" title="Remove from playlist">
+						${icons.close}
+					</button>
+				` : ""}
+				<button class="row-more-btn" data-more-id="${t.id}" title="Options">
+					${icons.dots}
+				</button>
 			</div>
 		</div>
-		${tracks.length === 0 ? `
-			<div class="empty">${icons.musicNote}<p>${q ? "No matches." : "Empty library."}</p></div>
-		` : `
-			<div class="tracklist">
-				${tracks.map((t, i) => trackRow(t, i)).join("")}
-			</div>
-		`}
 	`;
+}
 
-	document.getElementById("btn-add-folder")?.addEventListener("click", addFolder);
-	document.getElementById("btn-add-files")?.addEventListener("click", addFiles);
+function renderTrackTable(tracks: TrackInfo[], opts?: { hideAlbumColumn?: boolean; playlistContext?: string }) {
+	if (tracks.length === 0) {
+		return `
+			<div class="empty-table-state">
+				<div class="empty-icon">${icons.musicNote}</div>
+				<p class="empty-text">No matching tracks in library.</p>
+				<button class="btn btn-ghost btn-sm" id="btn-clear-table-filter">Clear search & filters</button>
+			</div>
+		`;
+	}
 
-	for (const row of document.querySelectorAll<HTMLDivElement>(".track-row")) {
+	const sortArrow = (col: string) => {
+		if (state.librarySort !== col) return `<span class="sort-arr dim">${icons.sort}</span>`;
+		return state.librarySortAsc
+			? `<span class="sort-arr active asc">${icons.sortAsc}</span>`
+			: `<span class="sort-arr active desc">${icons.sortDesc}</span>`;
+	};
+
+	return `
+		<div class="cel-table-wrap">
+			<div class="cel-table-header ${opts?.hideAlbumColumn ? "hide-album" : ""}">
+				<div class="col-check">
+					<input type="checkbox" id="select-all-rows" title="Select all visible tracks" />
+				</div>
+				<div class="col-num th-sortable" data-sort="index"># ${sortArrow("index")}</div>
+				<div class="col-title th-sortable" data-sort="title">Title ${sortArrow("title")}</div>
+				<div class="col-artist th-sortable" data-sort="artist">Artist ${sortArrow("artist")}</div>
+				${opts?.hideAlbumColumn ? "" : `<div class="col-album th-sortable" data-sort="album">Album ${sortArrow("album")}</div>`}
+				<div class="col-duration th-sortable" data-sort="duration">Time ${sortArrow("duration")}</div>
+				<div class="col-codec th-sortable" data-sort="codec">Codec ${sortArrow("codec")}</div>
+				<div class="col-safety th-sortable" data-sort="safety">Safety ${sortArrow("safety")}</div>
+				<div class="col-plays th-sortable" data-sort="plays">Plays ${sortArrow("plays")}</div>
+				<div class="col-actions"></div>
+			</div>
+			<div class="cel-table-body ${opts?.hideAlbumColumn ? "hide-album" : ""}">
+				${tracks.map((t, i) => trackRow(t, i, opts)).join("")}
+			</div>
+		</div>
+	`;
+}
+
+function wireTrackRows(container: HTMLElement, tracks: TrackInfo[], opts?: { hideAlbumColumn?: boolean; playlistContext?: string }) {
+	const allBox = container.querySelector<HTMLInputElement>("#select-all-rows");
+	if (allBox) {
+		const allSelected = tracks.length > 0 && tracks.every((t) => state.selectedIds.has(t.id));
+		allBox.checked = allSelected;
+		allBox.addEventListener("change", () => {
+			if (allBox.checked) {
+				for (const t of tracks) state.selectedIds.add(t.id);
+			} else {
+				for (const t of tracks) state.selectedIds.delete(t.id);
+			}
+			updateBulkBar();
+			renderMain();
+		});
+	}
+
+	for (const th of container.querySelectorAll<HTMLElement>(".th-sortable")) {
+		th.addEventListener("click", () => {
+			const sortKey = th.dataset.sort as typeof state.librarySort;
+			if (state.librarySort === sortKey) {
+				state.librarySortAsc = !state.librarySortAsc;
+			} else {
+				state.librarySort = sortKey;
+				state.librarySortAsc = true;
+			}
+			sfx.toggle();
+			renderMain();
+		});
+	}
+
+	for (const row of container.querySelectorAll<HTMLDivElement>(".cel-track-row")) {
+		const id = row.dataset.id!;
+		const t = tracks.find((x) => x.id === id) || state.library.find((x) => x.id === id);
+
 		row.addEventListener("click", (e) => {
-			const id = row.dataset.id!;
-			// Shift / Ctrl click → toggle multi-select instead of play.
 			if (e.shiftKey || e.ctrlKey || e.metaKey) {
 				if (state.selectedIds.has(id)) state.selectedIds.delete(id);
 				else state.selectedIds.add(id);
@@ -2248,22 +2904,1008 @@ function renderLibrary(root: HTMLElement) {
 				sfx.play();
 			}
 		});
+
+		row.querySelector(".row-checkbox")?.addEventListener("change", (e) => {
+			e.stopPropagation();
+			const cb = e.target as HTMLInputElement;
+			if (cb.checked) state.selectedIds.add(id);
+			else state.selectedIds.delete(id);
+			row.classList.toggle("is-selected", cb.checked);
+			updateBulkBar();
+		});
+
+		row.querySelector(".row-fav-btn")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const cur = state.ratings[id] ?? 0;
+			const nextVal = cur >= 4 ? 0 : 5;
+			state.ratings[id] = nextVal;
+			saveRatings();
+			sfx.toggle();
+			const btn = row.querySelector(".row-fav-btn");
+			if (btn) {
+				btn.classList.toggle("active", nextVal >= 4);
+				btn.innerHTML = nextVal >= 4 ? icons.heartFill : icons.heart;
+			}
+		});
+
+		row.querySelector(".row-more-btn")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const targetTrack = t || state.library.find((x) => x.id === id);
+			if (targetTrack) {
+				const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+				showContextMenu(rect.left, rect.bottom + 4, ctxItemsForTrack(targetTrack));
+			}
+		});
+
+		row.querySelector(".row-remove-pl-btn")?.addEventListener("click", async (e) => {
+			e.stopPropagation();
+			const plName = (e.currentTarget as HTMLElement).dataset.remPl;
+			const pl = state.playlists.find((p) => p.name === plName);
+			if (pl) {
+				pl.ids = pl.ids.filter((x) => x !== id);
+				await savePlaylists();
+				sfx.toggle();
+				toast(`Removed track from "${pl.name}"`, { ttl: 1800 });
+				renderMain();
+				renderSidebarPlaylists();
+			}
+		});
+
+		row.querySelector(".artist-link")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const artist = (e.currentTarget as HTMLElement).dataset.artist;
+			if (artist) {
+				state.searchQuery = artist;
+				state.libraryTab = "tracks";
+				sfx.click();
+				renderMain();
+			}
+		});
+
+		row.querySelector(".album-link")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const album = (e.currentTarget as HTMLElement).dataset.album;
+			if (album) {
+				state.activeAlbumKey = album;
+				state.libraryTab = "albums";
+				sfx.click();
+				renderMain();
+			}
+		});
+
 		row.addEventListener("contextmenu", (e) => {
 			e.preventDefault();
-			const id = row.dataset.id!;
-			// If you right-click a selected row, the menu acts on the whole set.
 			if (state.selectedIds.has(id) && state.selectedIds.size > 1) {
 				showContextMenu(e.clientX, e.clientY, ctxItemsForBulk());
 				return;
 			}
-			const t = state.library.find((x) => x.id === id);
-			if (t) showContextMenu(e.clientX, e.clientY, ctxItemsForTrack(t));
+			const targetTrack = t || state.library.find((x) => x.id === id);
+			if (targetTrack) showContextMenu(e.clientX, e.clientY, ctxItemsForTrack(targetTrack));
 		});
-		if (state.selectedIds.has(row.dataset.id!)) row.classList.add("is-selected");
 	}
+
+	container.querySelector("#btn-clear-table-filter")?.addEventListener("click", () => {
+		state.searchQuery = "";
+		state.libraryFilterTag = "all";
+		renderMain();
+	});
+}
+
+// ---------- Overhauled Library View ----------
+function renderLibrary(root: HTMLElement) {
+	const q = state.searchQuery.toLowerCase().trim();
+
+	// 1. Filter by Search Query
+	let tracks = q
+		? state.library.filter((t) =>
+			[t.title, t.artist, t.album, t.genre ?? "", t.verifiedFormat ?? ""].some((s) => s.toLowerCase().includes(q)))
+		: [...state.library];
+
+	// 2. Filter by Tag Pills
+	const allCount = state.library.length;
+	const hiresCount = state.library.filter(isHiResLossless).length;
+	const animeCount = state.library.filter(isAnimeTrack).length;
+	const videoCount = state.library.filter((t) => t.kind === "video").length;
+	const favCount = state.library.filter(isFavoriteTrack).length;
+	const recentCount = Math.min(30, state.library.length);
+
+	switch (state.libraryFilterTag) {
+		case "hires": tracks = tracks.filter(isHiResLossless); break;
+		case "anime": tracks = tracks.filter(isAnimeTrack); break;
+		case "video": tracks = tracks.filter((t) => t.kind === "video"); break;
+		case "favorites": tracks = tracks.filter(isFavoriteTrack); break;
+		case "recent": tracks = tracks.filter(isRecentlyAdded); break;
+	}
+
+	// 3. Sort tracks
+	tracks.sort((a, b) => {
+		let res = 0;
+		switch (state.librarySort) {
+			case "artist":
+				res = a.artist.localeCompare(b.artist) || a.album.localeCompare(b.album);
+				break;
+			case "album":
+				res = a.album.localeCompare(b.album) || (a.trackNumber ?? 0) - (b.trackNumber ?? 0);
+				break;
+			case "duration":
+				res = (a.duration ?? 0) - (b.duration ?? 0);
+				break;
+			case "codec":
+				res = getCodecInfo(a).label.localeCompare(getCodecInfo(b).label);
+				break;
+			case "safety":
+				res = (b.securityScore ?? 100) - (a.securityScore ?? 100);
+				break;
+			case "plays":
+				res = (state.playStats[b.id] ?? 0) - (state.playStats[a.id] ?? 0);
+				break;
+			case "year":
+				res = (b.year ?? 0) - (a.year ?? 0) || a.artist.localeCompare(b.artist);
+				break;
+			case "index":
+				res = state.library.indexOf(a) - state.library.indexOf(b);
+				break;
+			default:
+				res = a.title.localeCompare(b.title) || a.artist.localeCompare(b.artist);
+				break;
+		}
+		return state.librarySortAsc ? res : -res;
+	});
+
+	// Grouping for tabs
+	const uniqueAlbums = Array.from(new Set(state.library.map((t) => `${t.album}///${t.artist}`)));
+	const uniqueArtists = Array.from(new Set(state.library.map((t) => t.artist)));
+
+	root.innerHTML = `
+		<div class="lib-container">
+			<div class="topbar lib-topbar">
+				<div class="lib-header-left">
+					<h2>Library</h2>
+					<div class="lib-subnav-pills">
+						<button class="lib-subnav-btn ${state.libraryTab === "tracks" ? "active" : ""}" data-tab="tracks">
+							${icons.musicNote}<span>Tracks</span><span class="lib-pill-count">${tracks.length}</span>
+						</button>
+						<button class="lib-subnav-btn ${state.libraryTab === "albums" ? "active" : ""}" data-tab="albums">
+							${icons.disc}<span>Albums</span><span class="lib-pill-count">${uniqueAlbums.length}</span>
+						</button>
+						<button class="lib-subnav-btn ${state.libraryTab === "artists" ? "active" : ""}" data-tab="artists">
+							${icons.artist}<span>Artists</span><span class="lib-pill-count">${uniqueArtists.length}</span>
+						</button>
+						<button class="lib-subnav-btn ${state.libraryTab === "dropzone" ? "active" : ""}" data-tab="dropzone">
+							${icons.download}<span>Import Dropzone</span>
+						</button>
+					</div>
+				</div>
+				<div class="topbar-actions">
+					<div class="search-wrap cel-search">
+						${icons.search}
+						<input class="search" id="search-input" placeholder="Instant filter tracks, artists, codecs…" value="${escapeHtml(state.searchQuery)}" />
+						${state.searchQuery ? `<button class="search-clear-btn" id="btn-search-clear">${icons.close}</button>` : ""}
+					</div>
+					<button class="btn" id="btn-add-files">${icons.plus}<span>Add files</span></button>
+					<button class="btn btn-primary" id="btn-add-folder">${icons.folder}<span>Add folder</span></button>
+					${state.library.length > 0 ? `<button class="btn btn-ghost" id="btn-lib-shuffle" title="Shuffle Library">${icons.shuffle}</button>` : ""}
+				</div>
+			</div>
+
+			<div class="tag-filter-bar">
+				<button class="tag-pill ${state.libraryFilterTag === "all" ? "active" : ""}" data-tag="all">
+					<span>✨ All</span><span class="tag-count">${allCount}</span>
+				</button>
+				<button class="tag-pill ${state.libraryFilterTag === "hires" ? "active" : ""}" data-tag="hires">
+					<span class="hires-dot"></span><span>Hi-Res Lossless</span><span class="tag-count">${hiresCount}</span>
+				</button>
+				<button class="tag-pill ${state.libraryFilterTag === "anime" ? "active" : ""}" data-tag="anime">
+					<span>🌸 Anime / OST</span><span class="tag-count">${animeCount}</span>
+				</button>
+				<button class="tag-pill ${state.libraryFilterTag === "video" ? "active" : ""}" data-tag="video">
+					<span>🎬 Video</span><span class="tag-count">${videoCount}</span>
+				</button>
+				<button class="tag-pill ${state.libraryFilterTag === "favorites" ? "active" : ""}" data-tag="favorites">
+					<span>⭐ Favorites</span><span class="tag-count">${favCount}</span>
+				</button>
+				<button class="tag-pill ${state.libraryFilterTag === "recent" ? "active" : ""}" data-tag="recent">
+					<span>⚡ Recently Added</span><span class="tag-count">${recentCount}</span>
+				</button>
+			</div>
+
+			<div class="lib-tab-content" id="lib-tab-content">
+				${state.libraryTab === "tracks" ? renderTrackTable(tracks) : ""}
+				${state.libraryTab === "albums" ? `<div id="album-grid-mount"></div>` : ""}
+				${state.libraryTab === "artists" ? `<div id="artist-grid-mount"></div>` : ""}
+				${state.libraryTab === "dropzone" ? `<div id="dropzone-mount"></div>` : ""}
+			</div>
+		</div>
+	`;
+
+	// Wire Subnav Tab Buttons
+	for (const btn of root.querySelectorAll<HTMLButtonElement>(".lib-subnav-btn")) {
+		btn.addEventListener("click", () => {
+			state.libraryTab = btn.dataset.tab as typeof state.libraryTab;
+			sfx.click();
+			renderMain();
+		});
+	}
+
+	// Wire Tag Filter Pills
+	for (const pill of root.querySelectorAll<HTMLButtonElement>(".tag-pill")) {
+		pill.addEventListener("click", () => {
+			state.libraryFilterTag = pill.dataset.tag as typeof state.libraryFilterTag;
+			sfx.toggle();
+			renderMain();
+		});
+	}
+
+	// Wire Actions & Search
+	document.getElementById("btn-add-folder")?.addEventListener("click", addFolder);
+	document.getElementById("btn-add-files")?.addEventListener("click", addFiles);
+	document.getElementById("btn-lib-shuffle")?.addEventListener("click", () => {
+		if (state.library.length === 0) return;
+		state.settings.shuffle = true;
+		playFromList(state.library, Math.floor(Math.random() * state.library.length));
+		sfx.success();
+	});
+	document.getElementById("btn-search-clear")?.addEventListener("click", () => {
+		state.searchQuery = "";
+		renderMain();
+	});
+
+	// Mount Tab specific views
+	if (state.libraryTab === "tracks") {
+		wireTrackRows(root, tracks);
+	} else if (state.libraryTab === "albums") {
+		const mount = document.getElementById("album-grid-mount");
+		if (mount) renderAlbumGrid(mount, tracks);
+	} else if (state.libraryTab === "artists") {
+		const mount = document.getElementById("artist-grid-mount");
+		if (mount) renderArtistGrid(mount, tracks);
+	} else if (state.libraryTab === "dropzone") {
+		const mount = document.getElementById("dropzone-mount");
+		if (mount) renderMediaDropzone(mount);
+	}
+
 	updateBulkBar();
 	highlightPlayingRow();
 	wireSearch();
+}
+
+// ---------- Album Grid & Discography Accordion ----------
+function renderAlbumGrid(container: HTMLElement, tracks: TrackInfo[]) {
+	// Group tracks by album
+	const albumMap = new Map<string, { album: string; artist: string; tracks: TrackInfo[]; cover?: string; year?: number; hasHiRes: boolean }>();
+
+	for (const t of tracks) {
+		const key = `${t.album}///${t.artist}`;
+		if (!albumMap.has(key)) {
+			albumMap.set(key, {
+				album: t.album,
+				artist: t.artist,
+				tracks: [],
+				cover: t.artDataUrl,
+				year: t.year,
+				hasHiRes: isHiResLossless(t),
+			});
+		}
+		const group = albumMap.get(key)!;
+		group.tracks.push(t);
+		if (!group.cover && t.artDataUrl) group.cover = t.artDataUrl;
+		if (isHiResLossless(t)) group.hasHiRes = true;
+	}
+
+	const albums = Array.from(albumMap.values()).sort((a, b) => a.album.localeCompare(b.album));
+
+	if (albums.length === 0) {
+		container.innerHTML = `
+			<div class="empty-table-state">
+				<div class="empty-icon">${icons.disc}</div>
+				<p class="empty-text">No albums found matching criteria.</p>
+			</div>
+		`;
+		return;
+	}
+
+	container.innerHTML = `
+		<div class="albums-view-wrap">
+			${state.activeAlbumKey && albumMap.has(state.activeAlbumKey) ? `
+				<div class="discography-drawer-wrap" id="album-drawer">
+					${renderAlbumDrawer(albumMap.get(state.activeAlbumKey)!)}
+				</div>
+			` : ""}
+
+			<div class="cel-album-grid">
+				${albums.map((alb) => {
+					const albKey = `${alb.album}///${alb.artist}`;
+					const isActive = state.activeAlbumKey === albKey;
+					return `
+						<div class="album-cel-card ${isActive ? "active" : ""}" data-alb-key="${escapeHtml(albKey)}">
+							<div class="album-art-stage">
+								${alb.cover ? `
+									<img src="${alb.cover}" alt="${escapeHtml(alb.album)}" class="album-cover-img" loading="lazy" />
+								` : `
+									<div class="album-cover-fallback">
+										<div class="vinyl-record"><div class="vinyl-grooves"></div><div class="vinyl-label">${icons.disc}</div></div>
+									</div>
+								`}
+								<div class="album-glass-shine"></div>
+								${alb.hasHiRes ? `<span class="album-hires-badge">HI-RES</span>` : ""}
+								<div class="album-hover-overlay">
+									<button class="album-hover-play-btn" title="Play Album">${icons.play}</button>
+									<button class="album-hover-shuffle-btn" title="Shuffle Album">${icons.shuffle}</button>
+								</div>
+							</div>
+							<div class="album-card-info">
+								<h4 class="album-card-title" title="${escapeHtml(alb.album)}">${escapeHtml(alb.album)}</h4>
+								<p class="album-card-artist" title="${escapeHtml(alb.artist)}">${escapeHtml(alb.artist)}</p>
+								<div class="album-card-meta">
+									<span>${alb.tracks.length} track${alb.tracks.length === 1 ? "" : "s"}</span>
+									<span>•</span>
+									<span>${formatDurationSum(alb.tracks)}</span>
+									${alb.year ? `<span>•</span><span>${alb.year}</span>` : ""}
+								</div>
+							</div>
+						</div>
+					`;
+				}).join("")}
+			</div>
+		</div>
+	`;
+
+	// Wire Drawer events if mounted
+	if (state.activeAlbumKey && albumMap.has(state.activeAlbumKey)) {
+		const group = albumMap.get(state.activeAlbumKey)!;
+		const drawer = container.querySelector("#album-drawer") as HTMLElement;
+		if (drawer) {
+			wireTrackRows(drawer, group.tracks, { hideAlbumColumn: true });
+			drawer.querySelector("#btn-play-drawer")?.addEventListener("click", () => {
+				playFromList(group.tracks, 0);
+				sfx.play();
+			});
+			drawer.querySelector("#btn-shuffle-drawer")?.addEventListener("click", () => {
+				state.settings.shuffle = true;
+				playFromList(group.tracks, Math.floor(Math.random() * group.tracks.length));
+				sfx.success();
+			});
+			drawer.querySelector("#btn-queue-drawer")?.addEventListener("click", () => {
+				for (const tr of group.tracks) state.queue.push(tr);
+				toast(`Queued ${group.tracks.length} tracks from "${group.album}"`, { ttl: 2200 });
+				sfx.click();
+			});
+			drawer.querySelector("#btn-pl-drawer")?.addEventListener("click", (e) => {
+				const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+				showContextMenu(rect.left, rect.bottom + 4, [
+					{
+						label: "Add entire album to playlist",
+						onClick: () => {},
+						sub: state.playlists.length === 0
+							? [{ label: "(no playlists yet)", onClick: () => {} }]
+							: state.playlists.map((p) => ({
+								label: p.name,
+								onClick: () => {
+									for (const tr of group.tracks) if (!p.ids.includes(tr.id)) p.ids.push(tr.id);
+									savePlaylists();
+									toast(`Added album to "${p.name}"`, { ttl: 2200 });
+									sfx.click();
+								},
+							})),
+					},
+				]);
+			});
+			drawer.querySelector(".drawer-close")?.addEventListener("click", () => {
+				state.activeAlbumKey = null;
+				sfx.toggle();
+				renderMain();
+			});
+		}
+	}
+
+	// Wire Album Card clicks
+	for (const card of container.querySelectorAll<HTMLDivElement>(".album-cel-card")) {
+		const key = card.dataset.albKey!;
+		const group = albumMap.get(key);
+		if (!group) continue;
+
+		card.querySelector(".album-hover-play-btn")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			playFromList(group.tracks, 0);
+			sfx.play();
+		});
+
+		card.querySelector(".album-hover-shuffle-btn")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			state.settings.shuffle = true;
+			playFromList(group.tracks, Math.floor(Math.random() * group.tracks.length));
+			sfx.success();
+		});
+
+		card.addEventListener("click", () => {
+			state.activeAlbumKey = state.activeAlbumKey === key ? null : key;
+			sfx.click();
+			renderMain();
+		});
+	}
+}
+
+function renderAlbumDrawer(alb: { album: string; artist: string; tracks: TrackInfo[]; cover?: string; year?: number; hasHiRes: boolean }): string {
+	return `
+		<div class="discography-drawer">
+			<div class="drawer-hero">
+				<div class="drawer-art">
+					${alb.cover ? `<img src="${alb.cover}" alt="">` : `<div class="drawer-art-fallback">${icons.disc}</div>`}
+				</div>
+				<div class="drawer-info">
+					<div class="drawer-tag">ALBUM DISCOGRAPHY</div>
+					<h2 class="drawer-title">${escapeHtml(alb.album)}</h2>
+					<h3 class="drawer-artist">${escapeHtml(alb.artist)}</h3>
+					<div class="drawer-meta-row">
+						<span>${alb.tracks.length} tracks</span>
+						<span>•</span>
+						<span>${formatDurationSum(alb.tracks)}</span>
+						${alb.year ? `<span>•</span><span>${alb.year}</span>` : ""}
+						${alb.hasHiRes ? `<span class="badge-codec hires"><span class="hires-dot"></span>HI-RES LOSSLESS</span>` : ""}
+					</div>
+					<div class="drawer-actions">
+						<button class="btn btn-primary" id="btn-play-drawer">${icons.play}<span>Play Album</span></button>
+						<button class="btn" id="btn-shuffle-drawer">${icons.shuffle}<span>Shuffle</span></button>
+						<button class="btn btn-ghost" id="btn-queue-drawer">${icons.plus}<span>Add to Queue</span></button>
+						<button class="btn btn-ghost" id="btn-pl-drawer">${icons.list}<span>Add to Playlist</span></button>
+						<button class="btn btn-ghost drawer-close" title="Close discography">${icons.close}</button>
+					</div>
+				</div>
+			</div>
+			<div class="drawer-tracklist">
+				${renderTrackTable(alb.tracks, { hideAlbumColumn: true })}
+			</div>
+		</div>
+	`;
+}
+
+// ---------- Artist Grid & Discography View ----------
+function renderArtistGrid(container: HTMLElement, tracks: TrackInfo[]) {
+	const artistMap = new Map<string, { artist: string; tracks: TrackInfo[]; albums: Set<string>; avatar?: string; totalPlays: number }>();
+
+	for (const t of tracks) {
+		if (!artistMap.has(t.artist)) {
+			artistMap.set(t.artist, {
+				artist: t.artist,
+				tracks: [],
+				albums: new Set(),
+				avatar: t.artDataUrl,
+				totalPlays: 0,
+			});
+		}
+		const group = artistMap.get(t.artist)!;
+		group.tracks.push(t);
+		group.albums.add(t.album);
+		group.totalPlays += (state.playStats[t.id] ?? 0);
+		if (!group.avatar && t.artDataUrl) group.avatar = t.artDataUrl;
+	}
+
+	const artists = Array.from(artistMap.values()).sort((a, b) => a.artist.localeCompare(b.artist));
+
+	if (artists.length === 0) {
+		container.innerHTML = `
+			<div class="empty-table-state">
+				<div class="empty-icon">${icons.artist}</div>
+				<p class="empty-text">No artists found matching criteria.</p>
+			</div>
+		`;
+		return;
+	}
+
+	container.innerHTML = `
+		<div class="artists-view-wrap">
+			${state.activeArtistKey && artistMap.has(state.activeArtistKey) ? `
+				<div class="artist-discography-wrap" id="artist-drawer">
+					${renderArtistDiscography(artistMap.get(state.activeArtistKey)!)}
+				</div>
+			` : ""}
+
+			<div class="cel-artist-grid">
+				${artists.map((art) => {
+					const isActive = state.activeArtistKey === art.artist;
+					return `
+						<div class="artist-cel-card ${isActive ? "active" : ""}" data-artist="${escapeHtml(art.artist)}">
+							<div class="artist-avatar-stage">
+								<div class="artist-avatar-ring">
+									${art.avatar ? `
+										<img src="${art.avatar}" alt="${escapeHtml(art.artist)}" class="artist-avatar-img" loading="lazy" />
+									` : `
+										<div class="artist-avatar-fallback">${getInitials(art.artist)}</div>
+									`}
+								</div>
+								<div class="artist-hover-overlay">
+									<button class="artist-hover-play-btn" title="Play All by ${escapeHtml(art.artist)}">${icons.play}</button>
+								</div>
+							</div>
+							<div class="artist-card-info">
+								<h4 class="artist-card-title" title="${escapeHtml(art.artist)}">${escapeHtml(art.artist)}</h4>
+								<div class="artist-card-meta">
+									<span>${art.albums.size} album${art.albums.size === 1 ? "" : "s"}</span>
+									<span>•</span>
+									<span>${art.tracks.length} track${art.tracks.length === 1 ? "" : "s"}</span>
+									<span>•</span>
+									<span>${art.totalPlays} plays</span>
+								</div>
+							</div>
+						</div>
+					`;
+				}).join("")}
+			</div>
+		</div>
+	`;
+
+	// Wire Artist Drawer events if mounted
+	if (state.activeArtistKey && artistMap.has(state.activeArtistKey)) {
+		const group = artistMap.get(state.activeArtistKey)!;
+		const drawer = container.querySelector("#artist-drawer") as HTMLElement;
+		if (drawer) {
+			wireTrackRows(drawer, group.tracks);
+			drawer.querySelector("#btn-play-artist-drawer")?.addEventListener("click", () => {
+				playFromList(group.tracks, 0);
+				sfx.play();
+			});
+			drawer.querySelector("#btn-shuffle-artist-drawer")?.addEventListener("click", () => {
+				state.settings.shuffle = true;
+				playFromList(group.tracks, Math.floor(Math.random() * group.tracks.length));
+				sfx.success();
+			});
+			drawer.querySelector(".artist-drawer-close")?.addEventListener("click", () => {
+				state.activeArtistKey = null;
+				sfx.toggle();
+				renderMain();
+			});
+		}
+	}
+
+	// Wire Artist Card clicks
+	for (const card of container.querySelectorAll<HTMLDivElement>(".artist-cel-card")) {
+		const artistName = card.dataset.artist!;
+		const group = artistMap.get(artistName);
+		if (!group) continue;
+
+		card.querySelector(".artist-hover-play-btn")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			playFromList(group.tracks, 0);
+			sfx.play();
+		});
+
+		card.addEventListener("click", () => {
+			state.activeArtistKey = state.activeArtistKey === artistName ? null : artistName;
+			sfx.click();
+			renderMain();
+		});
+	}
+}
+
+function renderArtistDiscography(art: { artist: string; tracks: TrackInfo[]; albums: Set<string>; avatar?: string; totalPlays: number }): string {
+	const topTracks = [...art.tracks].sort((a, b) => (state.playStats[b.id] ?? 0) - (state.playStats[a.id] ?? 0)).slice(0, 5);
+
+	return `
+		<div class="discography-drawer artist-hero-drawer">
+			<div class="drawer-hero">
+				<div class="drawer-art artist-avatar-hero">
+					${art.avatar ? `<img src="${art.avatar}" alt="">` : `<div class="drawer-art-fallback">${getInitials(art.artist)}</div>`}
+				</div>
+				<div class="drawer-info">
+					<div class="drawer-tag">ARTIST DISCOGRAPHY</div>
+					<h2 class="drawer-title">${escapeHtml(art.artist)}</h2>
+					<div class="drawer-meta-row">
+						<span>${art.albums.size} albums</span>
+						<span>•</span>
+						<span>${art.tracks.length} tracks</span>
+						<span>•</span>
+						<span>${art.totalPlays} total plays</span>
+					</div>
+					<div class="drawer-actions">
+						<button class="btn btn-primary" id="btn-play-artist-drawer">${icons.play}<span>Play All Tracks</span></button>
+						<button class="btn" id="btn-shuffle-artist-drawer">${icons.shuffle}<span>Shuffle Artist</span></button>
+						<button class="btn btn-ghost artist-drawer-close" title="Close discography">${icons.close}</button>
+					</div>
+				</div>
+			</div>
+			
+			<div class="artist-section-header">Popular Tracks</div>
+			<div class="drawer-tracklist">
+				${renderTrackTable(topTracks)}
+			</div>
+
+			<div class="artist-section-header" style="margin-top:1.5rem">All Tracks (${art.tracks.length})</div>
+			<div class="drawer-tracklist">
+				${renderTrackTable(art.tracks)}
+			</div>
+		</div>
+	`;
+}
+
+// ---------- Media Import Dropzone View ----------
+function renderMediaDropzone(container: HTMLElement) {
+	container.innerHTML = `
+		<div class="import-dropzone-wrap">
+			<div class="dropzone-box" id="dropzone-target">
+				<div class="dropzone-corner tl"></div>
+				<div class="dropzone-corner tr"></div>
+				<div class="dropzone-corner bl"></div>
+				<div class="dropzone-corner br"></div>
+				
+				<div class="dropzone-glow-aura"></div>
+				<div class="dropzone-content">
+					<div class="dropzone-icon-ring">
+						<span class="dropzone-disc-icon">${icons.musicNote}</span>
+						<div class="dropzone-pulse-wave"></div>
+					</div>
+					<h3 class="dropzone-title">Drag & Drop Music or Video Files & Folders</h3>
+					<p class="dropzone-subtitle">Instant folder scan, lossless codec detection, cover art extraction & security verification</p>
+					
+					<div class="dropzone-buttons">
+						<button class="btn btn-primary btn-lg" id="dz-btn-folder">${icons.folder}<span>Choose Music Folder</span></button>
+						<button class="btn btn-lg" id="dz-btn-files">${icons.plus}<span>Select Individual Files</span></button>
+					</div>
+
+					<div class="dropzone-formats">
+						<span class="fmt-pill">.FLAC</span>
+						<span class="fmt-pill">.ALAC</span>
+						<span class="fmt-pill">.WAV</span>
+						<span class="fmt-pill">.DSD</span>
+						<span class="fmt-pill">.MP3</span>
+						<span class="fmt-pill">.AAC</span>
+						<span class="fmt-pill">.OGG</span>
+						<span class="fmt-pill">.OPUS</span>
+						<span class="fmt-pill">.MP4</span>
+						<span class="fmt-pill">.MKV</span>
+					</div>
+				</div>
+
+				<div class="dropzone-scan-status hidden" id="dz-scan-status">
+					<div class="scan-radar-spinner"></div>
+					<div class="scan-status-text" id="dz-status-text">Scanning folder…</div>
+					<div class="scan-progress-bar"><div class="scan-progress-fill" id="dz-progress-fill"></div></div>
+				</div>
+			</div>
+		</div>
+	`;
+
+	container.querySelector("#dz-btn-folder")?.addEventListener("click", addFolder);
+	container.querySelector("#dz-btn-files")?.addEventListener("click", addFiles);
+
+	const dz = container.querySelector("#dropzone-target") as HTMLElement;
+	if (dz) {
+		dz.addEventListener("dragover", (e) => {
+			e.preventDefault();
+			dz.classList.add("drag-hover");
+		});
+		dz.addEventListener("dragleave", () => {
+			dz.classList.remove("drag-hover");
+		});
+		dz.addEventListener("drop", async (e) => {
+			e.preventDefault();
+			dz.classList.remove("drag-hover");
+			if (!e.dataTransfer?.files?.length) return;
+			const files = Array.from(e.dataTransfer.files);
+			const paths = files
+				.map((f) => (f as any).path as string | undefined)
+				.filter((p): p is string => typeof p === "string" && p.length > 0);
+			if (paths.length === 0) {
+				toast("Drag-drop got no paths — try the Choose Folder button.", { ttl: 3000 });
+				return;
+			}
+			toast(`Importing ${paths.length} item${paths.length === 1 ? "" : "s"}…`, { ttl: 2000, key: "scan" });
+			try {
+				const { tracks } = await bun().addPathsToLibrary({ paths });
+				if (tracks.length > 0) {
+					mergeIntoLibrary(tracks);
+					toast(`Imported ${tracks.length} track${tracks.length === 1 ? "" : "s"}`, { ttl: 2400 });
+					sfx.success();
+				}
+			} catch (err) {
+				toast(`Import failed: ${(err as Error).message}`, { ttl: 3500 });
+				sfx.error();
+			}
+		});
+	}
+}
+
+function getTrackFormatBadge(t: TrackInfo): { label: string; isLossless: boolean; isHiRes: boolean } {
+	const ext = t.path.split(".").pop()?.toLowerCase() || "";
+	const sr = t.sampleRate || 44100;
+	const br = t.bitrate || 0;
+	const isHiRes = sr >= 48000 || ext === "flac" || ext === "dsd" || ext === "wav" || ext === "aiff";
+
+	if (ext === "flac") {
+		const khz = (sr / 1000).toFixed(sr % 1000 === 0 ? 0 : 1);
+		return { label: `FLAC ${khz}kHz`, isLossless: true, isHiRes };
+	}
+	if (ext === "dsd" || ext === "dsf" || ext === "dff") {
+		return { label: "DSD Direct", isLossless: true, isHiRes: true };
+	}
+	if (ext === "opus") {
+		return { label: "OPUS HD", isLossless: false, isHiRes: true };
+	}
+	if (ext === "wav") {
+		return { label: "WAV PCM", isLossless: true, isHiRes };
+	}
+	if (ext === "aiff" || ext === "aif") {
+		return { label: "AIFF HD", isLossless: true, isHiRes };
+	}
+	if (ext === "alac" || (ext === "m4a" && br > 500000)) {
+		return { label: "ALAC Lossless", isLossless: true, isHiRes };
+	}
+	if (ext === "mp3") {
+		const kbps = br ? Math.round(br / 1000) : 320;
+		return { label: `MP3 ${kbps}k`, isLossless: false, isHiRes: false };
+	}
+	if (ext === "aac" || ext === "m4a") {
+		return { label: "AAC Master", isLossless: false, isHiRes: false };
+	}
+	return { label: ext.toUpperCase() || "AUDIO", isLossless: false, isHiRes };
+}
+
+function toggleQuickEffect(fx: "eightD" | "bassBoost" | "vocalEnhance" | "reverbHall") {
+	state.quickEffects[fx] = !state.quickEffects[fx];
+	const val = state.quickEffects[fx];
+	engineA.setQuickEffects({ [fx]: val });
+	engineB.setQuickEffects({ [fx]: val });
+	sfx.toggle();
+
+	const idMap: Record<string, string> = {
+		eightD: "fx-8d",
+		bassBoost: "fx-bass",
+		vocalEnhance: "fx-vocal",
+		reverbHall: "fx-reverb",
+	};
+	const btn = document.getElementById(idMap[fx]);
+	if (btn) btn.classList.toggle("active", val);
+}
+
+function updateStageAudioPulse() {
+	if (state.view !== "nowplaying") return;
+	const stage = document.getElementById("np-cel-stage");
+	if (!stage || engine.paused) return;
+	const bands = engine.getAudioBands();
+	const halo = document.getElementById("np-audio-halo");
+	const rim = document.getElementById("np-vinyl-rim-pulse");
+	if (halo) {
+		const scale = 1.0 + bands.bass * 0.35;
+		const opacity = 0.4 + bands.energy * 0.6;
+		halo.style.setProperty("--halo-scale", scale.toFixed(2));
+		halo.style.setProperty("--halo-opacity", opacity.toFixed(2));
+	}
+	if (rim) {
+		const rimOpacity = 0.3 + bands.bass * 0.7;
+		rim.style.setProperty("--audio-pulse-opacity", rimOpacity.toFixed(2));
+	}
+}
+
+let userScrollingLyricsTimer: ReturnType<typeof setTimeout> | null = null;
+let isUserScrollingLyrics = false;
+
+async function loadTrackLyrics(t: TrackInfo, forceReload = false) {
+	if (!t) return;
+	if (!forceReload && state.lyricsCache[t.id]) {
+		if (state.view === "nowplaying") renderLyricsContent(t);
+		return;
+	}
+	state.lyricsLoading = true;
+	if (state.view === "nowplaying") renderLyricsLoading();
+	try {
+		const res = await bun().getLyrics({
+			artist: t.artist,
+			album: t.album,
+			title: t.title,
+			path: t.path,
+		});
+		const synced: LyricLine[] = (res?.synced || []).map((line) => ({
+			time: line.time,
+			text: line.text,
+			romaji: containsJapanese(line.text) ? toRomaji(line.text) : undefined,
+		}));
+		state.lyricsCache[t.id] = {
+			plain: res?.plain || null,
+			synced,
+		};
+	} catch (err) {
+		console.warn("[lyrics] Failed to fetch lyrics:", err);
+		state.lyricsCache[t.id] = { plain: null, synced: [] };
+	} finally {
+		state.lyricsLoading = false;
+		if (state.view === "nowplaying" && state.currentTrack?.id === t.id) {
+			renderLyricsContent(t);
+		}
+	}
+}
+
+function renderLyricsLoading() {
+	const body = document.getElementById("np-lyrics-body");
+	if (!body) return;
+	body.innerHTML = `
+		<div class="np-lyrics-empty">
+			<div class="np-live-dot" style="width:18px;height:18px;margin-bottom:0.5rem"></div>
+			<p>Retrieving synced lyrics from database & local tags…</p>
+		</div>
+	`;
+}
+
+function renderLyricsContent(t: TrackInfo) {
+	const body = document.getElementById("np-lyrics-body");
+	if (!body) return;
+	const data = state.lyricsCache[t.id];
+	if (!data || (!data.plain && (!data.synced || data.synced.length === 0))) {
+		body.innerHTML = `
+			<div class="np-lyrics-empty">
+				${icons.mic}
+				<p>No synced lyrics found for this track. Place a matching <code>.lrc</code> file in the album folder or fetch from LRCLIB.</p>
+				<button class="np-lyrics-btn" id="btn-fetch-lyrics">${icons.search} <span>Search Online</span></button>
+			</div>
+		`;
+		document.getElementById("btn-fetch-lyrics")?.addEventListener("click", () => {
+			sfx.click();
+			loadTrackLyrics(t, true);
+		});
+		return;
+	}
+
+	if (data.synced && data.synced.length > 0) {
+		const mode = state.lyricsMode;
+		body.innerHTML = `
+			<div class="np-lyrics-scroll" id="np-lyrics-scroll">
+				${data.synced.map((line, idx) => `
+					<div class="lrc-line" data-idx="${idx}" data-time="${line.time}">
+						<div class="lrc-text">${escapeHtml(line.text)}</div>
+						${mode !== "original" && line.romaji ? `<div class="lrc-romaji">${escapeHtml(line.romaji)}</div>` : ""}
+						<div class="lrc-time-stamp">${formatTime(line.time)}</div>
+					</div>
+				`).join("")}
+			</div>
+		`;
+
+		const scrollContainer = document.getElementById("np-lyrics-scroll");
+		if (scrollContainer) {
+			scrollContainer.addEventListener("wheel", () => {
+				isUserScrollingLyrics = true;
+				if (userScrollingLyricsTimer) clearTimeout(userScrollingLyricsTimer);
+				userScrollingLyricsTimer = setTimeout(() => {
+					isUserScrollingLyrics = false;
+				}, 3000);
+			}, { passive: true });
+		}
+
+		for (const lineEl of body.querySelectorAll<HTMLDivElement>(".lrc-line")) {
+			lineEl.addEventListener("click", () => {
+				const time = parseFloat(lineEl.dataset.time || "0");
+				engine.seek(time);
+				sfx.click();
+				updateKaraokeLyrics(time);
+			});
+		}
+		updateKaraokeLyrics(engine.currentTime);
+	} else if (data.plain) {
+		body.innerHTML = `
+			<div class="np-lyrics-scroll" style="white-space: pre-wrap; font-size: 1.05rem; line-height: 1.8; color: rgba(232, 232, 245, 0.75);">
+				${escapeHtml(data.plain)}
+			</div>
+		`;
+	}
+}
+
+function updateKaraokeLyrics(currentTime: number) {
+	const t = state.currentTrack;
+	if (!t) return;
+	const data = state.lyricsCache[t.id];
+	if (!data || !data.synced || data.synced.length === 0) return;
+
+	const activeIdx = findActiveLyricIndex(data.synced, currentTime);
+	if (activeIdx === state.activeLyricIndex) return;
+	state.activeLyricIndex = activeIdx;
+
+	const lines = document.querySelectorAll<HTMLDivElement>("#np-lyrics-scroll .lrc-line");
+	lines.forEach((el, idx) => {
+		const isActive = idx === activeIdx;
+		const isPassed = idx < activeIdx;
+		el.classList.toggle("active", isActive);
+		el.classList.toggle("passed", isPassed);
+	});
+
+	if (activeIdx >= 0 && !isUserScrollingLyrics) {
+		const activeEl = lines[activeIdx];
+		if (activeEl) {
+			activeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+		}
+	}
+}
+
+function renderTrackInspectorModal(t: TrackInfo) {
+	let modal = document.getElementById("np-inspector-modal") as HTMLDivElement | null;
+	if (!modal) {
+		modal = document.createElement("div");
+		modal.id = "np-inspector-modal";
+		modal.className = "np-inspector-modal";
+		document.body.appendChild(modal);
+	}
+
+	const formatInfo = getTrackFormatBadge(t);
+	const ext = t.path.split(".").pop()?.toUpperCase() || "AUDIO";
+	const fileSizeMb = (t.size / (1024 * 1024)).toFixed(2);
+	const srKhz = ((t.sampleRate || 44100) / 1000).toFixed(1);
+	const brKbps = t.bitrate ? Math.round(t.bitrate / 1000) : "VBR";
+	const threatText = t.securityThreats && t.securityThreats.length > 0 ? t.securityThreats.join(", ") : "None (Clean Media)";
+	const secScore = t.securityScore !== undefined ? t.securityScore : 100;
+	const isSafe = t.securitySafe !== false;
+
+	modal.innerHTML = `
+		<div class="np-inspector-card" id="np-inspector-card">
+			<div class="np-inspector-header">
+				<div class="np-inspector-title">
+					${isSafe ? icons.shieldCheck : icons.shieldAlert}
+					<span>Track Inspector & Integrity</span>
+				</div>
+				<button class="np-inspector-close" id="np-inspector-close">×</button>
+			</div>
+
+			<div>
+				<div class="np-inspector-section-title">Master Audio Specification</div>
+				<div class="np-inspector-grid">
+					<div class="np-stat-box">
+						<span class="np-stat-label">Codec & Container</span>
+						<span class="np-stat-val" style="color:var(--accent-a)">${formatInfo.label} (${ext})</span>
+					</div>
+					<div class="np-stat-box">
+						<span class="np-stat-label">Sample Rate</span>
+						<span class="np-stat-val">${srKhz} kHz • Stereo</span>
+					</div>
+					<div class="np-stat-box">
+						<span class="np-stat-label">Bitrate</span>
+						<span class="np-stat-val">${brKbps} kbps</span>
+					</div>
+					<div class="np-stat-box">
+						<span class="np-stat-label">File Size / Duration</span>
+						<span class="np-stat-val">${fileSizeMb} MB • ${formatTime(t.duration)}</span>
+					</div>
+				</div>
+			</div>
+
+			<div>
+				<div class="np-inspector-section-title">Security & Authenticity Clearance</div>
+				<div class="np-inspector-grid">
+					<div class="np-stat-box">
+						<span class="np-stat-label">Security Trust Score</span>
+						<span class="np-stat-val" style="color:${isSafe ? '#86efac' : '#f87171'}">${secScore}/100 — ${isSafe ? 'Verified Safe' : 'Threat Detected'}</span>
+					</div>
+					<div class="np-stat-box">
+						<span class="np-stat-label">Binary Payload Scan</span>
+						<span class="np-stat-val" style="color:${isSafe ? '#86efac' : '#f87171'}">${threatText}</span>
+					</div>
+				</div>
+			</div>
+
+			<div>
+				<div class="np-inspector-section-title">Storage Location</div>
+				<div class="np-inspector-path">
+					<div class="np-path-text" title="${escapeHtml(t.path)}">${escapeHtml(t.path)}</div>
+					<div class="np-path-actions">
+						<button class="np-path-btn" id="btn-inspect-copy">${icons.copy} <span>Copy</span></button>
+						<button class="np-path-btn" id="btn-inspect-folder">${icons.folder} <span>Show</span></button>
+					</div>
+				</div>
+			</div>
+		</div>
+	`;
+
+	modal.classList.add("open");
+
+	document.getElementById("np-inspector-close")?.addEventListener("click", () => {
+		modal?.classList.remove("open");
+	});
+	modal.addEventListener("click", (e) => {
+		if (e.target === modal) modal?.classList.remove("open");
+	});
+	document.getElementById("btn-inspect-copy")?.addEventListener("click", () => {
+		navigator.clipboard.writeText(t.path);
+		toast("File path copied to clipboard", { ttl: 2000 });
+		sfx.click();
+	});
+	document.getElementById("btn-inspect-folder")?.addEventListener("click", () => {
+		bun().showInFolder({ path: t.path });
+		sfx.open();
+	});
 }
 
 function renderNowPlaying(root: HTMLElement) {
@@ -2275,47 +3917,119 @@ function renderNowPlaying(root: HTMLElement) {
 
 	if (t.kind === "video") {
 		root.innerHTML = `
-			<div class="video-wrap">
-				<div class="video-stage" id="video-mount">
-					<div class="video-overlay">
-						<div class="video-info">
-							<div class="video-title">${escapeHtml(t.title)}</div>
-							<div class="video-sub">${escapeHtml(t.artist)}${t.album ? ` — ${escapeHtml(t.album)}` : ""}</div>
-						</div>
-						<button class="video-pip" id="video-pip" title="Picture-in-picture">${icons.pip}</button>
-						<div class="video-center-indicator" id="video-indicator"></div>
-					</div>
-				</div>
-				<div class="video-meta">
-					${escapeHtml(t.album)}${t.year ? ` • ${t.year}` : ""}${t.genre ? ` • ${escapeHtml(t.genre)}` : ""}${t.bitrate ? ` • ${Math.round(t.bitrate / 1000)} kbps` : ""}
-				</div>
-			</div>
+			<div class="video-cinema-mount" id="video-mount"></div>
 		`;
-		// renderMain() handles the actual mount of videoEl into #video-mount
-		// after this function returns. We wire interactions here.
 		queueMicrotask(() => wireVideoStage());
 		return;
 	}
 
+	const isPlaying = !engine.paused;
+	const formatInfo = getTrackFormatBadge(t);
+	const fx = state.quickEffects;
+
 	root.innerHTML = `
 		<div class="np-full">
-			<div>
-				<div class="np-full-art">
-					${t.artDataUrl ? `<img src="${t.artDataUrl}" alt="">` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;opacity:.5">${icons.musicNote}</div>`}
+			<!-- Left Column: 2026 Cel-Shaded Album Art Stage + Quick Effects + Viz -->
+			<div class="np-left-column">
+				<div class="np-stage-container">
+					<div class="np-audio-halo" id="np-audio-halo"></div>
+					<div class="np-cel-stage ${isPlaying ? 'is-playing' : 'is-paused'}" id="np-cel-stage">
+						<!-- Sleeve Jacket -->
+						<div class="np-sleeve-jacket">
+							<div class="np-sleeve-art">
+								${t.artDataUrl ? `<img src="${t.artDataUrl}" alt="">` : `<div class="np-sleeve-placeholder">${icons.musicNote}</div>`}
+								<div class="np-sleeve-gloss"></div>
+								<div class="np-sleeve-border"></div>
+								<div class="np-sleeve-badge ${formatInfo.isHiRes ? 'hi-res' : ''}">${formatInfo.label}</div>
+							</div>
+						</div>
+						<!-- Emerging Vinyl Record Mockup -->
+						<div class="np-vinyl-disc ${isPlaying ? 'spinning' : ''}" id="np-vinyl-disc">
+							<div class="np-vinyl-grooves"></div>
+							<div class="np-vinyl-shine"></div>
+							<div class="np-vinyl-label">
+								${t.artDataUrl ? `<img src="${t.artDataUrl}" alt="">` : `<div style="opacity:.4">${icons.musicNote}</div>`}
+								<div class="np-vinyl-spindle"></div>
+							</div>
+							<div class="np-vinyl-rim-pulse" id="np-vinyl-rim-pulse"></div>
+						</div>
+					</div>
 				</div>
-				<div class="viz"><canvas id="viz-canvas"></canvas></div>
+
+				<!-- Quick Audio Effects Toolbar -->
+				<div class="np-effects-bar">
+					<button class="np-effect-btn btn-8d ${fx.eightD ? 'active' : ''}" id="fx-8d" title="360° Binaural 8D Audio Rotation">
+						${icons.eightD}
+						<span>8D Audio</span>
+					</button>
+					<button class="np-effect-btn btn-bass ${fx.bassBoost ? 'active' : ''}" id="fx-bass" title="+7.5dB Sub-Bass Drive">
+						${icons.bass}
+						<span>Bass Boost</span>
+					</button>
+					<button class="np-effect-btn ${fx.vocalEnhance ? 'active' : ''}" id="fx-vocal" title="+5.5dB Vocal Presence & Mid Clarity">
+						${icons.vocal}
+						<span>Vocal</span>
+					</button>
+					<button class="np-effect-btn ${fx.reverbHall ? 'active' : ''}" id="fx-reverb" title="Concert Hall Spatial Acoustics">
+						${icons.reverb}
+						<span>Reverb</span>
+					</button>
+					<button class="np-effect-btn" id="np-btn-cinema" title="Fullscreen Cinema View (F)">
+						${icons.maximize}
+						<span>Cinema</span>
+					</button>
+				</div>
+
+				<!-- Visualizer Card -->
+				<div class="np-viz-card">
+					<canvas id="viz-canvas"></canvas>
+					<div class="np-viz-badge">${state.settings.vizStyle}</div>
+				</div>
 			</div>
-			<div class="np-full-info">
-				<h1>${escapeHtml(t.title)}</h1>
-				<h2>${escapeHtml(t.artist)}</h2>
-				<div class="meta">${escapeHtml(t.album)}${t.year ? ` • ${t.year}` : ""}${t.genre ? ` • ${escapeHtml(t.genre)}` : ""}${t.bitrate ? ` • ${Math.round(t.bitrate / 1000)} kbps` : ""}</div>
-				<div class="lyrics" style="margin-top:1.3rem">
-					<em>No synced lyrics for this track. Drop an .lrc file next to the audio file and it'll show up here in a future update.</em>
+
+			<!-- Right Column: Track Info + Real-time Synced Karaoke Lyrics -->
+			<div class="np-right-column">
+				<div class="np-header-info">
+					<div class="np-badges-row">
+						<span class="format-chip ${formatInfo.isHiRes ? 'gold' : ''}">${formatInfo.label}</span>
+						${t.securitySafe !== false ? `<span class="format-chip safe">${icons.shieldCheck} Verified Clean</span>` : ""}
+						<button class="np-inspect-trigger" id="np-btn-inspect">${icons.shield} <span>Inspector</span></button>
+					</div>
+					<h1 class="np-title-h1">${escapeHtml(t.title)}</h1>
+					<h2 class="np-artist-h2">${escapeHtml(t.artist)}</h2>
+					<div class="np-meta-line">
+						<span>${escapeHtml(t.album)}</span>
+						${t.year ? `<span>• ${t.year}</span>` : ""}
+						${t.genre ? `<span>• ${escapeHtml(t.genre)}</span>` : ""}
+						${t.bitrate ? `<span>• ${Math.round(t.bitrate / 1000)} kbps</span>` : ""}
+					</div>
+				</div>
+
+				<!-- Real-time Synced Karaoke Lyrics Side-Panel -->
+				<div class="np-lyrics-panel">
+					<div class="np-lyrics-header">
+						<div class="np-lyrics-label">
+							<div class="np-live-dot"></div>
+							<span>Karaoke & Lyrics</span>
+						</div>
+						<div class="np-lyrics-actions">
+							<div class="np-lyrics-tab-group">
+								<button class="np-lyrics-tab ${state.lyricsMode === 'dual' ? 'active' : ''}" data-mode="dual">Dual</button>
+								<button class="np-lyrics-tab ${state.lyricsMode === 'romaji' ? 'active' : ''}" data-mode="romaji">Romaji</button>
+								<button class="np-lyrics-tab ${state.lyricsMode === 'original' ? 'active' : ''}" data-mode="original">Original</button>
+							</div>
+							<button class="np-lyrics-icon-btn" id="btn-reload-lyrics" title="Reload Lyrics">${icons.search}</button>
+						</div>
+					</div>
+					<div id="np-lyrics-body" style="flex:1;display:flex;flex-direction:column;min-height:0">
+						<!-- Content populated dynamically -->
+					</div>
 				</div>
 			</div>
 		</div>
 	`;
 
+	// Visualizer mount
 	const canvas = document.getElementById("viz-canvas") as HTMLCanvasElement | null;
 	if (canvas) {
 		visualizer?.destroy();
@@ -2326,59 +4040,561 @@ function renderNowPlaying(root: HTMLElement) {
 		});
 		if (t.artDataUrl) updateAccentFromArt(t.artDataUrl);
 	}
+
+	// Wire Quick Effects
+	document.getElementById("fx-8d")?.addEventListener("click", () => toggleQuickEffect("eightD"));
+	document.getElementById("fx-bass")?.addEventListener("click", () => toggleQuickEffect("bassBoost"));
+	document.getElementById("fx-vocal")?.addEventListener("click", () => toggleQuickEffect("vocalEnhance"));
+	document.getElementById("fx-reverb")?.addEventListener("click", () => toggleQuickEffect("reverbHall"));
+	document.getElementById("np-btn-cinema")?.addEventListener("click", () => {
+		sfx.open();
+		enterImmersive();
+	});
+
+	// Wire Inspector
+	document.getElementById("np-btn-inspect")?.addEventListener("click", () => {
+		sfx.click();
+		renderTrackInspectorModal(t);
+	});
+
+	// Wire Lyrics Mode tabs
+	for (const tab of root.querySelectorAll<HTMLButtonElement>(".np-lyrics-tab")) {
+		tab.addEventListener("click", () => {
+			state.lyricsMode = tab.dataset.mode as LyricMode;
+			sfx.click();
+			renderNowPlaying(root);
+		});
+	}
+	document.getElementById("btn-reload-lyrics")?.addEventListener("click", () => {
+		sfx.click();
+		loadTrackLyrics(t, true);
+	});
+
+	// Load & render lyrics
+	loadTrackLyrics(t);
+}
+
+let activeStudioTab: "eq" | "spatial" | "lofi" | "hall" | "matrix" = "eq";
+let activeScopeMode: "dual" | "spectrum" | "scope" | "phase" = "dual";
+let studioAnimRaf: number | null = null;
+
+function syncDspToEngines() {
+	if (!state.settings.dsp) return;
+	engineA.setDsp(state.settings.dsp);
+	engineB.setDsp(state.settings.dsp);
+	videoEngine.setDsp(state.settings.dsp);
+	saveSettings();
 }
 
 function renderEqualizer(root: HTMLElement) {
+	if (studioAnimRaf !== null) {
+		cancelAnimationFrame(studioAnimRaf);
+		studioAnimRaf = null;
+	}
+
+	if (!state.settings.dsp) {
+		state.settings.dsp = {
+			...DEFAULT_DSP_SETTINGS,
+			eq: state.settings.eq ? [...state.settings.eq] : [...DEFAULT_DSP_SETTINGS.eq],
+			eqPreset: state.settings.eqPreset ?? DEFAULT_DSP_SETTINGS.eqPreset,
+		};
+	}
+
+	const dsp = state.settings.dsp;
 	const customNames = Object.keys(state.settings.customEqPresets);
+
 	root.innerHTML = `
-		<div class="topbar">
-			<h2>Equalizer</h2>
-			<div class="topbar-actions">
-				<button class="btn" id="eq-save">${icons.plus}<span>Save preset</span></button>
-			</div>
-		</div>
-		<div class="eq-presets" id="eq-presets">
-			${Object.keys(EQ_PRESETS).map((p) => `
-				<div class="preset ${p === state.settings.eqPreset ? "active" : ""}" data-p="${p}">${p}</div>
-			`).join("")}
-			${customNames.map((p) => `
-				<div class="preset preset-custom ${p === state.settings.eqPreset ? "active" : ""}" data-p="${p}" data-custom="1">
-					${escapeHtml(p)}
-					<span class="preset-x" data-del="${escapeHtml(p)}" title="Delete">×</span>
+		<div class="studio-container">
+			<!-- Studio Topbar -->
+			<div class="studio-topbar">
+				<div class="studio-title-block">
+					<div class="studio-badge"><span class="badge-dot"></span>DSP STUDIO v2.0</div>
+					<h2>Audio DSP & FX Studio</h2>
 				</div>
-			`).join("")}
-		</div>
-		<div class="eq-wrap">
-			<div class="eq" id="eq">
-				${EQ_BANDS.map((f, i) => `
-					<div class="eq-band">
-						<span class="eq-band-value" id="eqv-${i}">${state.settings.eq[i].toFixed(0)} dB</span>
-						<input type="range" min="-24" max="24" step="1" value="${state.settings.eq[i]}" data-i="${i}" />
-						<span class="eq-band-label">${f >= 1000 ? (f / 1000) + "k" : f}</span>
+				<div class="studio-topbar-actions">
+					<button class="btn btn-outline" id="studio-btn-nodes" data-tip="Switch to visual audio node graph editor" title="Open Node Graph">
+						${icons.node}<span>Node Graph</span>
+					</button>
+					<button class="btn btn-outline" id="studio-btn-reset-fx" data-tip="Reset all DSP parameters to clean state" title="Reset All Effects">
+						<span>Reset All FX</span>
+					</button>
+					<button class="btn btn-primary" id="eq-save" data-tip="Save current EQ as a custom preset" title="Save Preset">
+						${icons.plus}<span>Save Preset</span>
+					</button>
+				</div>
+			</div>
+
+			<!-- Master Audio Scope & Spectrum Analyzer Deck -->
+			<div class="studio-master-scope-card">
+				<div class="scope-card-header">
+					<div class="scope-header-left">
+						<span class="scope-title-label">MASTER AUDIO ANALYZER</span>
+						<div class="scope-mode-pills">
+							<button class="scope-pill ${activeScopeMode === "dual" ? "active" : ""}" data-scope="dual">Dual View</button>
+							<button class="scope-pill ${activeScopeMode === "spectrum" ? "active" : ""}" data-scope="spectrum">Spectrum FFT</button>
+							<button class="scope-pill ${activeScopeMode === "scope" ? "active" : ""}" data-scope="scope">Oscilloscope</button>
+							<button class="scope-pill ${activeScopeMode === "phase" ? "active" : ""}" data-scope="phase">Phase Scope</button>
+						</div>
 					</div>
-				`).join("")}
+					<div class="scope-meters-container">
+						<div class="meter-channel">
+							<span class="meter-ch-label">L</span>
+							<div class="meter-track"><div class="meter-bar" id="scope-meter-l"></div></div>
+							<span class="meter-val" id="scope-val-l">-inf dB</span>
+						</div>
+						<div class="meter-channel">
+							<span class="meter-ch-label">R</span>
+							<div class="meter-track"><div class="meter-bar" id="scope-meter-r"></div></div>
+							<span class="meter-val" id="scope-val-r">-inf dB</span>
+						</div>
+						<div class="meter-clip-led" id="scope-clip-led" title="Clip Indicator">CLIP</div>
+					</div>
+				</div>
+				<div class="scope-canvas-wrap">
+					<canvas id="studio-scope-canvas" class="studio-scope-canvas" height="140"></canvas>
+					<div class="scope-freq-bands-legend">
+						<span class="freq-tag">SUB (&lt;60Hz)</span>
+						<span class="freq-tag">BASS (60-250Hz)</span>
+						<span class="freq-tag">LOW-MID (250-500Hz)</span>
+						<span class="freq-tag">MID (500-2kHz)</span>
+						<span class="freq-tag">HIGH-MID (2k-4kHz)</span>
+						<span class="freq-tag">PRESENCE (4k-8kHz)</span>
+						<span class="freq-tag">BRILLIANCE (8k-20kHz)</span>
+					</div>
+				</div>
+			</div>
+
+			<!-- Studio Navigation Tabs -->
+			<div class="studio-nav-tabs">
+				<button class="studio-tab-btn ${activeStudioTab === "eq" ? "active" : ""}" data-tab="eq">
+					<span class="tab-icon">🎛️</span>
+					<span class="tab-label">10-Band Graphic EQ</span>
+				</button>
+				<button class="studio-tab-btn ${activeStudioTab === "spatial" ? "active" : ""}" data-tab="spatial">
+					<span class="tab-icon">🌌</span>
+					<span class="tab-label">8D Spatial Studio</span>
+					${dsp.spatial8dEnabled ? `<span class="tab-active-dot"></span>` : ""}
+				</button>
+				<button class="studio-tab-btn ${activeStudioTab === "lofi" ? "active" : ""}" data-tab="lofi">
+					<span class="tab-icon">📼</span>
+					<span class="tab-label">Lo-Fi Tape & Vinyl</span>
+					${dsp.lofiEnabled ? `<span class="tab-active-dot"></span>` : ""}
+				</button>
+				<button class="studio-tab-btn ${activeStudioTab === "hall" ? "active" : ""}" data-tab="hall">
+					<span class="tab-icon">🏛️</span>
+					<span class="tab-label">Concert Hall & Widener</span>
+					${dsp.reverbEnabled || dsp.widenerEnabled ? `<span class="tab-active-dot"></span>` : ""}
+				</button>
+				<button class="studio-tab-btn ${activeStudioTab === "matrix" ? "active" : ""}" data-tab="matrix">
+					<span class="tab-icon">⚡</span>
+					<span class="tab-label">Master FX Matrix</span>
+				</button>
+			</div>
+
+			<!-- TAB 1: 10-Band Graphic Equalizer -->
+			<div class="studio-tab-pane ${activeStudioTab === "eq" ? "active" : ""}" id="pane-eq">
+				<!-- Curated EQ Presets -->
+				<div class="eq-presets-ribbon" id="eq-presets">
+					<div class="presets-label">Curated Profiles:</div>
+					${Object.keys(EQ_PRESETS).map((p) => `
+						<div class="preset-chip ${p === dsp.eqPreset ? "active" : ""}" data-p="${p}">${escapeHtml(p)}</div>
+					`).join("")}
+					${customNames.map((p) => `
+						<div class="preset-chip preset-custom ${p === dsp.eqPreset ? "active" : ""}" data-p="${p}" data-custom="1">
+							<span>${escapeHtml(p)}</span>
+							<span class="preset-del-btn" data-del="${escapeHtml(p)}" title="Delete Preset">×</span>
+						</div>
+					`).join("")}
+				</div>
+
+				<!-- Frequency Response Curve Canvas -->
+				<div class="eq-curve-card">
+					<div class="curve-header">
+						<span class="curve-title">FREQUENCY RESPONSE CURVE</span>
+						<span class="curve-hint">Drag nodes on canvas or adjust anime sliders below</span>
+					</div>
+					<canvas id="eq-curve-canvas" class="eq-curve-canvas" height="150"></canvas>
+				</div>
+
+				<!-- 10-Band Sliders Grid -->
+				<div class="eq-sliders-card">
+					<div class="eq-bands-grid" id="eq-bands">
+						${EQ_BANDS.map((f, i) => `
+							<div class="eq-band-col" data-idx="${i}">
+								<button class="eq-val-badge" id="eqv-${i}" data-tip="Click to reset band to 0 dB" title="Reset to 0 dB">
+									${dsp.eq[i] > 0 ? "+" : ""}${dsp.eq[i].toFixed(0)} dB
+								</button>
+								<div class="eq-slider-rail">
+									<input type="range" class="eq-slider-input" min="-24" max="24" step="1" value="${dsp.eq[i]}" data-i="${i}" />
+								</div>
+								<span class="eq-freq-label">${f >= 1000 ? (f / 1000) + "k" : f}</span>
+							</div>
+						`).join("")}
+					</div>
+
+					<!-- Master Pre-Amp -->
+					<div class="eq-preamp-bar">
+						<span class="preamp-label">PRE-AMP GAIN</span>
+						<input type="range" id="eq-preamp-slider" min="-12" max="12" step="0.5" value="${state.settings.preAmp}" />
+						<button class="preamp-val-badge" id="preamp-val" title="Click to reset Pre-Amp to 0 dB">
+							${state.settings.preAmp > 0 ? "+" : ""}${state.settings.preAmp.toFixed(1)} dB
+						</button>
+					</div>
+				</div>
+			</div>
+
+			<!-- TAB 2: 8D Spatial Audio Studio -->
+			<div class="studio-tab-pane ${activeStudioTab === "spatial" ? "active" : ""}" id="pane-spatial">
+				<div class="spatial-studio-grid">
+					<!-- 3D Binaural Radar HUD -->
+					<div class="radar-card">
+						<div class="radar-header">
+							<span class="radar-title">3D BINAURAL RADAR PANNER</span>
+							<span class="radar-coords" id="radar-coords-label">X: 0.0m | Z: 0.0m | θ: 0°</span>
+						</div>
+						<div class="radar-canvas-container">
+							<canvas id="radar-8d-canvas" class="radar-8d-canvas" width="280" height="280"></canvas>
+							<div class="radar-center-head" title="Listener (Headphones)">🎧</div>
+						</div>
+						<div class="radar-hint">Click & drag on radar to steer sound position manually</div>
+					</div>
+
+					<!-- 8D Orbit Controls -->
+					<div class="spatial-controls-card">
+						<div class="ctrl-header-row">
+							<div class="ctrl-title-group">
+								<h3>8D Spatial Rotation Engine</h3>
+								<p>Orbits the audio around the listener in full 3D binaural HRTF acoustic space.</p>
+							</div>
+							<label class="toggle-switch">
+								<input type="checkbox" id="spatial-toggle" ${dsp.spatial8dEnabled ? "checked" : ""} />
+								<span class="slider-toggle"></span>
+							</label>
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Rotation Speed</span>
+								<span class="param-val" id="spatial-speed-val">${dsp.spatial8dSpeed.toFixed(1)} s/cycle</span>
+							</div>
+							<input type="range" id="spatial-speed-slider" min="1" max="30" step="0.5" value="${dsp.spatial8dSpeed}" />
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Soundstage Radius</span>
+								<span class="param-val" id="spatial-radius-val">${dsp.spatial8dRadius.toFixed(1)} m</span>
+							</div>
+							<input type="range" id="spatial-radius-slider" min="0.5" max="10" step="0.1" value="${dsp.spatial8dRadius}" />
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Orbit Pattern</span>
+							</div>
+							<div class="orbit-pattern-buttons">
+								<button class="pattern-btn ${dsp.spatial8dPattern === "circle_cw" ? "active" : ""}" data-pattern="circle_cw">Clockwise</button>
+								<button class="pattern-btn ${dsp.spatial8dPattern === "circle_ccw" ? "active" : ""}" data-pattern="circle_ccw">Counter-CW</button>
+								<button class="pattern-btn ${dsp.spatial8dPattern === "figure8" ? "active" : ""}" data-pattern="figure8">Figure-8</button>
+								<button class="pattern-btn ${dsp.spatial8dPattern === "ellipse" ? "active" : ""}" data-pattern="ellipse">Ellipse</button>
+							</div>
+						</div>
+
+						<div class="spatial-switches-row">
+							<label class="switch-chip">
+								<input type="checkbox" id="spatial-doppler-toggle" ${dsp.spatial8dDoppler ? "checked" : ""} />
+								<span>Doppler Shift Pitch Detune</span>
+							</label>
+							<label class="switch-chip">
+								<input type="checkbox" id="spatial-elev-toggle" ${dsp.spatial8dElevation ? "checked" : ""} />
+								<span>3D Vertical Elevation</span>
+							</label>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- TAB 3: Lo-Fi Tape & Vinyl Engine -->
+			<div class="studio-tab-pane ${activeStudioTab === "lofi" ? "active" : ""}" id="pane-lofi">
+				<div class="lofi-studio-grid">
+					<!-- Tape Deck Deck -->
+					<div class="lofi-deck-card">
+						<div class="ctrl-header-row">
+							<div class="ctrl-title-group">
+								<h3>Analog Tape Saturation</h3>
+								<p>Asymmetrical magnetic tape compression with rich second & third harmonics.</p>
+							</div>
+							<label class="toggle-switch">
+								<input type="checkbox" id="lofi-master-toggle" ${dsp.lofiEnabled ? "checked" : ""} />
+								<span class="slider-toggle"></span>
+							</label>
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Tape Warmth / Saturation</span>
+								<span class="param-val" id="lofi-warmth-val">${Math.round(dsp.lofiWarmth * 100)}%</span>
+							</div>
+							<input type="range" id="lofi-warmth-slider" min="0" max="1" step="0.01" value="${dsp.lofiWarmth}" />
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Tape Head Tone (High Cut)</span>
+								<span class="param-val" id="lofi-tone-val">${Math.round(dsp.lofiTone)} Hz</span>
+							</div>
+							<input type="range" id="lofi-tone-slider" min="2000" max="20000" step="200" value="${dsp.lofiTone}" />
+						</div>
+
+						<div class="tape-curve-viz-box">
+							<canvas id="tape-curve-canvas" class="tape-curve-canvas" width="260" height="90"></canvas>
+						</div>
+					</div>
+
+					<!-- Wow, Flutter & Vinyl Deck -->
+					<div class="lofi-deck-card">
+						<div class="ctrl-header-row">
+							<div class="ctrl-title-group">
+								<h3>Wow, Flutter & Vinyl Dust</h3>
+								<p>Capstan mechanical pitch sway and procedural needle groove friction.</p>
+							</div>
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Pitch Wobble Depth (Wow & Flutter)</span>
+								<span class="param-val" id="lofi-wow-val">${Math.round(dsp.lofiWowFlutter * 100)}%</span>
+							</div>
+							<input type="range" id="lofi-wow-slider" min="0" max="1" step="0.01" value="${dsp.lofiWowFlutter}" />
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Wobble Speed Rate</span>
+								<span class="param-val" id="lofi-wowrate-val">${dsp.lofiWowRate.toFixed(1)} Hz</span>
+							</div>
+							<input type="range" id="lofi-wowrate-slider" min="0.2" max="4.0" step="0.1" value="${dsp.lofiWowRate}" />
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Vinyl Dust & Crackle Level</span>
+								<span class="param-val" id="lofi-crackle-val">${Math.round(dsp.lofiCrackle * 100)}%</span>
+							</div>
+							<input type="range" id="lofi-crackle-slider" min="0" max="1" step="0.01" value="${dsp.lofiCrackle}" />
+						</div>
+
+						<!-- Cassette Animation Deck -->
+						<div class="cassette-anim-box">
+							<canvas id="cassette-reels-canvas" class="cassette-reels-canvas" width="260" height="70"></canvas>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- TAB 4: Concert Hall Reverb & Surround Widener -->
+			<div class="studio-tab-pane ${activeStudioTab === "hall" ? "active" : ""}" id="pane-hall">
+				<div class="hall-studio-grid">
+					<!-- Haas Stereo Widener -->
+					<div class="hall-deck-card">
+						<div class="ctrl-header-row">
+							<div class="ctrl-title-group">
+								<h3>Haas Stereo Soundstage Widener</h3>
+								<p>Expands perceptual acoustic stereo width far beyond physical earcups.</p>
+							</div>
+							<label class="toggle-switch">
+								<input type="checkbox" id="widener-toggle" ${dsp.widenerEnabled ? "checked" : ""} />
+								<span class="slider-toggle"></span>
+							</label>
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Stereo Field Expansion</span>
+								<span class="param-val" id="widener-width-val">${Math.round(dsp.stereoWidth * 100)}%</span>
+							</div>
+							<input type="range" id="widener-width-slider" min="0" max="2" step="0.01" value="${dsp.stereoWidth}" />
+						</div>
+
+						<div class="widener-phase-box">
+							<canvas id="widener-phase-canvas" class="widener-phase-canvas" width="260" height="90"></canvas>
+						</div>
+					</div>
+
+					<!-- Convolution Reverb -->
+					<div class="hall-deck-card">
+						<div class="ctrl-header-row">
+							<div class="ctrl-title-group">
+								<h3>Concert Hall Convolution Reverb</h3>
+								<p>Lush early reflections and diffuse acoustic decay impulse responses.</p>
+							</div>
+							<label class="toggle-switch">
+								<input type="checkbox" id="reverb-toggle" ${dsp.reverbEnabled ? "checked" : ""} />
+								<span class="slider-toggle"></span>
+							</label>
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Acoustic Space Preset</span>
+							</div>
+							<div class="reverb-presets-row">
+								<button class="reverb-p-btn ${dsp.reverbPreset === "studio" ? "active" : ""}" data-preset="studio">Studio</button>
+								<button class="reverb-p-btn ${dsp.reverbPreset === "warm_room" ? "active" : ""}" data-preset="warm_room">Warm Room</button>
+								<button class="reverb-p-btn ${dsp.reverbPreset === "concert_hall" ? "active" : ""}" data-preset="concert_hall">Concert Hall</button>
+								<button class="reverb-p-btn ${dsp.reverbPreset === "tokyo_arena" ? "active" : ""}" data-preset="tokyo_arena">Tokyo Arena</button>
+								<button class="reverb-p-btn ${dsp.reverbPreset === "cosmic_void" ? "active" : ""}" data-preset="cosmic_void">Cosmic Void</button>
+							</div>
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Decay Time</span>
+								<span class="param-val" id="reverb-decay-val">${dsp.reverbDecay.toFixed(1)} s</span>
+							</div>
+							<input type="range" id="reverb-decay-slider" min="0.5" max="8.0" step="0.1" value="${dsp.reverbDecay}" />
+						</div>
+
+						<div class="studio-param-row">
+							<div class="param-meta">
+								<span class="param-name">Wet / Dry Reverb Mix</span>
+								<span class="param-val" id="reverb-mix-val">${Math.round(dsp.reverbMix * 100)}%</span>
+							</div>
+							<input type="range" id="reverb-mix-slider" min="0" max="1" step="0.01" value="${dsp.reverbMix}" />
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- TAB 5: Master FX Matrix Deck -->
+			<div class="studio-tab-pane ${activeStudioTab === "matrix" ? "active" : ""}" id="pane-matrix">
+				<div class="matrix-grid">
+					<div class="matrix-module-card ${dsp.spatial8dEnabled ? "is-active" : ""}">
+						<div class="module-head">
+							<span class="mod-icon">🌌</span>
+							<span class="mod-title">8D Binaural Radar</span>
+							<span class="mod-status">${dsp.spatial8dEnabled ? "ACTIVE" : "BYPASSED"}</span>
+						</div>
+						<p>Speed: ${dsp.spatial8dSpeed}s | Radius: ${dsp.spatial8dRadius}m | Pattern: ${dsp.spatial8dPattern}</p>
+					</div>
+
+					<div class="matrix-module-card ${dsp.lofiEnabled ? "is-active" : ""}">
+						<div class="module-head">
+							<span class="mod-icon">📼</span>
+							<span class="mod-title">Lo-Fi Tape Saturation</span>
+							<span class="mod-status">${dsp.lofiEnabled ? "ACTIVE" : "BYPASSED"}</span>
+						</div>
+						<p>Warmth: ${Math.round(dsp.lofiWarmth * 100)}% | Wow: ${Math.round(dsp.lofiWowFlutter * 100)}% | Vinyl: ${Math.round(dsp.lofiCrackle * 100)}%</p>
+					</div>
+
+					<div class="matrix-module-card ${dsp.widenerEnabled ? "is-active" : ""}">
+						<div class="module-head">
+							<span class="mod-icon">↔️</span>
+							<span class="mod-title">Haas Stereo Expander</span>
+							<span class="mod-status">${dsp.widenerEnabled ? "ACTIVE" : "BYPASSED"}</span>
+						</div>
+						<p>Stereo Width: ${Math.round(dsp.stereoWidth * 100)}%</p>
+					</div>
+
+					<div class="matrix-module-card ${dsp.reverbEnabled ? "is-active" : ""}">
+						<div class="module-head">
+							<span class="mod-icon">🏛️</span>
+							<span class="mod-title">Concert Hall Reverb</span>
+							<span class="mod-status">${dsp.reverbEnabled ? "ACTIVE" : "BYPASSED"}</span>
+						</div>
+						<p>Preset: ${dsp.reverbPreset} | Decay: ${dsp.reverbDecay}s | Mix: ${Math.round(dsp.reverbMix * 100)}%</p>
+					</div>
+				</div>
 			</div>
 		</div>
 	`;
 
-	for (const p of document.querySelectorAll<HTMLDivElement>("#eq-presets .preset")) {
+	// Sync DSP to engines right away
+	syncDspToEngines();
+
+	// -------------------------------------------------------------
+	// TAB SWITCHING
+	// -------------------------------------------------------------
+	for (const btn of root.querySelectorAll<HTMLButtonElement>(".studio-tab-btn")) {
+		btn.addEventListener("click", () => {
+			activeStudioTab = btn.dataset.tab as any;
+			sfx.click();
+			renderEqualizer(root);
+		});
+	}
+
+	// SCOPE MODE SWITCHING
+	for (const pill of root.querySelectorAll<HTMLButtonElement>(".scope-pill")) {
+		pill.addEventListener("click", () => {
+			activeScopeMode = pill.dataset.scope as any;
+			sfx.click();
+			root.querySelectorAll(".scope-pill").forEach((p) => p.classList.remove("active"));
+			pill.classList.add("active");
+		});
+	}
+
+	// -------------------------------------------------------------
+	// TOP ACTIONS
+	// -------------------------------------------------------------
+	document.getElementById("studio-btn-nodes")?.addEventListener("click", () => {
+		sfx.click();
+		navigate("nodes");
+	});
+
+	document.getElementById("studio-btn-reset-fx")?.addEventListener("click", () => {
+		sfx.toggle();
+		state.settings.dsp = { ...DEFAULT_DSP_SETTINGS };
+		state.settings.eq = [...DEFAULT_DSP_SETTINGS.eq];
+		state.settings.eqPreset = DEFAULT_DSP_SETTINGS.eqPreset;
+		state.settings.preAmp = 0;
+		syncDspToEngines();
+		saveSettings();
+		toast("All audio DSP effects reset to default", { ttl: 2000 });
+		renderEqualizer(root);
+	});
+
+	document.getElementById("eq-save")?.addEventListener("click", () => {
+		const name = prompt("Name this custom preset:")?.trim();
+		if (!name) return;
+		if (EQ_PRESETS[name]) {
+			toast(`"${name}" is a built-in preset name — please choose another.`, { ttl: 3000 });
+			return;
+		}
+		state.settings.customEqPresets[name] = [...state.settings.dsp.eq];
+		state.settings.dsp.eqPreset = name;
+		state.settings.eqPreset = name;
+		saveSettings();
+		sfx.success();
+		renderEqualizer(root);
+	});
+
+	// -------------------------------------------------------------
+	// 10-BAND EQ SLIDERS & PRESETS
+	// -------------------------------------------------------------
+	for (const p of root.querySelectorAll<HTMLDivElement>("#eq-presets .preset-chip")) {
 		p.addEventListener("click", (e) => {
-			// Delete handle on a custom preset — don't switch to it.
 			if ((e.target as HTMLElement).dataset.del) {
 				const name = (e.target as HTMLElement).dataset.del!;
 				delete state.settings.customEqPresets[name];
-				if (state.settings.eqPreset === name) state.settings.eqPreset = "Flat";
+				if (state.settings.dsp.eqPreset === name) {
+					state.settings.dsp.eqPreset = "Anime J-Pop";
+					state.settings.eqPreset = "Anime J-Pop";
+					state.settings.dsp.eq = [...EQ_PRESETS["Anime J-Pop"]];
+					state.settings.eq = [...EQ_PRESETS["Anime J-Pop"]];
+				}
+				syncDspToEngines();
 				saveSettings();
 				sfx.toggle();
 				renderEqualizer(root);
 				return;
 			}
 			const name = p.dataset.p!;
+			state.settings.dsp.eqPreset = name;
 			state.settings.eqPreset = name;
-			state.settings.eq = [...(
-				EQ_PRESETS[name] ?? state.settings.customEqPresets[name] ?? EQ_PRESETS.Flat
-			)];
-			engine.setEq(state.settings.eq);
+			const presetGains = EQ_PRESETS[name] ?? state.settings.customEqPresets[name] ?? EQ_PRESETS["Anime J-Pop"];
+			state.settings.dsp.eq = [...presetGains];
+			state.settings.eq = [...presetGains];
+			syncDspToEngines();
 			saveSettings();
 			sfx.click();
 			renderEqualizer(root);
@@ -2386,75 +4602,1268 @@ function renderEqualizer(root: HTMLElement) {
 		p.addEventListener("mouseenter", () => sfx.hover());
 	}
 
-	document.getElementById("eq-save")?.addEventListener("click", () => {
-		const name = prompt("Name this preset:")?.trim();
-		if (!name) return;
-		if (EQ_PRESETS[name]) {
-			toast(`"${name}" is a built-in preset name — pick another.`, { ttl: 3000 });
-			return;
-		}
-		state.settings.customEqPresets[name] = [...state.settings.eq];
-		state.settings.eqPreset = name;
-		saveSettings();
-		sfx.success();
-		renderEqualizer(root);
-	});
-
-	for (const s of document.querySelectorAll<HTMLInputElement>(".eq-band input")) {
+	for (const s of root.querySelectorAll<HTMLInputElement>(".eq-slider-input")) {
 		syncRangeFill(s);
 		s.addEventListener("input", () => {
 			const i = parseInt(s.dataset.i!, 10);
 			const v = parseInt(s.value, 10);
+			state.settings.dsp.eq[i] = v;
 			state.settings.eq[i] = v;
+			state.settings.dsp.eqPreset = "Custom";
 			state.settings.eqPreset = "Custom";
-			engine.setEq(state.settings.eq);
-			document.getElementById(`eqv-${i}`)!.textContent = `${v} dB`;
+			syncDspToEngines();
+			const badge = document.getElementById(`eqv-${i}`);
+			if (badge) badge.textContent = `${v > 0 ? "+" : ""}${v} dB`;
 			syncRangeFill(s);
 			saveSettings();
 		});
 	}
-}
 
-function renderPlaylists(root: HTMLElement) {
-	root.innerHTML = `
-		<div class="topbar">
-			<h2>Playlists</h2>
-			<div class="topbar-actions">
-				<button class="btn" id="btn-import-pl">${icons.folder}<span>Import M3U…</span></button>
-				<button class="btn btn-primary" id="btn-new-pl">${icons.plus}<span>New playlist</span></button>
-			</div>
-		</div>
-		${state.playlists.length === 0 ? `
-			<div class="empty">${icons.list}<p>You haven't made any playlists yet.</p></div>
-		` : `
-			<div class="grid">
-				${state.playlists.map((p) => `
-					<div class="card" data-pl="${escapeHtml(p.name)}">
-						<div class="card-art">${icons.list}</div>
-						<p class="card-title">${escapeHtml(p.name)}</p>
-						<p class="card-sub">${p.ids.length} track${p.ids.length === 1 ? "" : "s"}</p>
-					</div>
-				`).join("")}
-			</div>
-		`}
-	`;
+	for (const b of root.querySelectorAll<HTMLButtonElement>(".eq-val-badge")) {
+		b.addEventListener("click", () => {
+			const col = b.closest<HTMLElement>(".eq-band-col");
+			if (!col) return;
+			const i = parseInt(col.dataset.idx!, 10);
+			state.settings.dsp.eq[i] = 0;
+			state.settings.eq[i] = 0;
+			state.settings.dsp.eqPreset = "Custom";
+			state.settings.eqPreset = "Custom";
+			syncDspToEngines();
+			const slider = col.querySelector<HTMLInputElement>(".eq-slider-input");
+			if (slider) {
+				slider.value = "0";
+				syncRangeFill(slider);
+			}
+			b.textContent = "0 dB";
+			sfx.toggle();
+			saveSettings();
+		});
+	}
 
-	document.getElementById("btn-new-pl")?.addEventListener("click", async () => {
-		const name = prompt("Playlist name?")?.trim();
-		if (!name) return;
-		state.playlists.push({ name, ids: [] });
-		await savePlaylists();
-		sfx.success();
-		renderPlaylists(root);
-		renderSidebarPlaylists();
+	// PreAmp Slider
+	const preampSlider = root.querySelector<HTMLInputElement>("#eq-preamp-slider");
+	const preampVal = root.querySelector<HTMLButtonElement>("#preamp-val");
+	if (preampSlider && preampVal) {
+		syncRangeFill(preampSlider);
+		preampSlider.addEventListener("input", () => {
+			const v = parseFloat(preampSlider.value);
+			state.settings.preAmp = v;
+			engineA.setPreAmp(v);
+			engineB.setPreAmp(v);
+			videoEngine.setPreAmp(v);
+			preampVal.textContent = `${v > 0 ? "+" : ""}${v.toFixed(1)} dB`;
+			syncRangeFill(preampSlider);
+			saveSettings();
+		});
+		preampVal.addEventListener("click", () => {
+			state.settings.preAmp = 0;
+			preampSlider.value = "0";
+			engineA.setPreAmp(0);
+			engineB.setPreAmp(0);
+			videoEngine.setPreAmp(0);
+			preampVal.textContent = "0.0 dB";
+			syncRangeFill(preampSlider);
+			sfx.toggle();
+			saveSettings();
+		});
+	}
+
+	// -------------------------------------------------------------
+	// 8D SPATIAL CONTROLS
+	// -------------------------------------------------------------
+	const spatialToggle = root.querySelector<HTMLInputElement>("#spatial-toggle");
+	spatialToggle?.addEventListener("change", () => {
+		dsp.spatial8dEnabled = spatialToggle.checked;
+		syncDspToEngines();
+		saveSettings();
+		sfx.toggle();
+		renderEqualizer(root);
 	});
 
+	const spatialSpeedSlider = root.querySelector<HTMLInputElement>("#spatial-speed-slider");
+	spatialSpeedSlider?.addEventListener("input", () => {
+		dsp.spatial8dSpeed = parseFloat(spatialSpeedSlider.value);
+		const label = document.getElementById("spatial-speed-val");
+		if (label) label.textContent = `${dsp.spatial8dSpeed.toFixed(1)} s/cycle`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	const spatialRadiusSlider = root.querySelector<HTMLInputElement>("#spatial-radius-slider");
+	spatialRadiusSlider?.addEventListener("input", () => {
+		dsp.spatial8dRadius = parseFloat(spatialRadiusSlider.value);
+		const label = document.getElementById("spatial-radius-val");
+		if (label) label.textContent = `${dsp.spatial8dRadius.toFixed(1)} m`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	for (const pBtn of root.querySelectorAll<HTMLButtonElement>(".pattern-btn")) {
+		pBtn.addEventListener("click", () => {
+			dsp.spatial8dPattern = pBtn.dataset.pattern as any;
+			root.querySelectorAll(".pattern-btn").forEach((b) => b.classList.remove("active"));
+			pBtn.classList.add("active");
+			syncDspToEngines();
+			saveSettings();
+			sfx.click();
+		});
+	}
+
+	const dopplerToggle = root.querySelector<HTMLInputElement>("#spatial-doppler-toggle");
+	dopplerToggle?.addEventListener("change", () => {
+		dsp.spatial8dDoppler = dopplerToggle.checked;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	const elevToggle = root.querySelector<HTMLInputElement>("#spatial-elev-toggle");
+	elevToggle?.addEventListener("change", () => {
+		dsp.spatial8dElevation = elevToggle.checked;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	// -------------------------------------------------------------
+	// LO-FI TAPE & VINYL CONTROLS
+	// -------------------------------------------------------------
+	const lofiMasterToggle = root.querySelector<HTMLInputElement>("#lofi-master-toggle");
+	lofiMasterToggle?.addEventListener("change", () => {
+		dsp.lofiEnabled = lofiMasterToggle.checked;
+		syncDspToEngines();
+		saveSettings();
+		sfx.toggle();
+		renderEqualizer(root);
+	});
+
+	const lofiWarmthSlider = root.querySelector<HTMLInputElement>("#lofi-warmth-slider");
+	lofiWarmthSlider?.addEventListener("input", () => {
+		dsp.lofiWarmth = parseFloat(lofiWarmthSlider.value);
+		const label = document.getElementById("lofi-warmth-val");
+		if (label) label.textContent = `${Math.round(dsp.lofiWarmth * 100)}%`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	const lofiToneSlider = root.querySelector<HTMLInputElement>("#lofi-tone-slider");
+	lofiToneSlider?.addEventListener("input", () => {
+		dsp.lofiTone = parseFloat(lofiToneSlider.value);
+		const label = document.getElementById("lofi-tone-val");
+		if (label) label.textContent = `${Math.round(dsp.lofiTone)} Hz`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	const lofiWowSlider = root.querySelector<HTMLInputElement>("#lofi-wow-slider");
+	lofiWowSlider?.addEventListener("input", () => {
+		dsp.lofiWowFlutter = parseFloat(lofiWowSlider.value);
+		const label = document.getElementById("lofi-wow-val");
+		if (label) label.textContent = `${Math.round(dsp.lofiWowFlutter * 100)}%`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	const lofiWowRateSlider = root.querySelector<HTMLInputElement>("#lofi-wowrate-slider");
+	lofiWowRateSlider?.addEventListener("input", () => {
+		dsp.lofiWowRate = parseFloat(lofiWowRateSlider.value);
+		const label = document.getElementById("lofi-wowrate-val");
+		if (label) label.textContent = `${dsp.lofiWowRate.toFixed(1)} Hz`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	const lofiCrackleSlider = root.querySelector<HTMLInputElement>("#lofi-crackle-slider");
+	lofiCrackleSlider?.addEventListener("input", () => {
+		dsp.lofiCrackle = parseFloat(lofiCrackleSlider.value);
+		const label = document.getElementById("lofi-crackle-val");
+		if (label) label.textContent = `${Math.round(dsp.lofiCrackle * 100)}%`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	// -------------------------------------------------------------
+	// CONCERT HALL & WIDENER CONTROLS
+	// -------------------------------------------------------------
+	const widenerToggle = root.querySelector<HTMLInputElement>("#widener-toggle");
+	widenerToggle?.addEventListener("change", () => {
+		dsp.widenerEnabled = widenerToggle.checked;
+		syncDspToEngines();
+		saveSettings();
+		sfx.toggle();
+		renderEqualizer(root);
+	});
+
+	const widenerWidthSlider = root.querySelector<HTMLInputElement>("#widener-width-slider");
+	widenerWidthSlider?.addEventListener("input", () => {
+		dsp.stereoWidth = parseFloat(widenerWidthSlider.value);
+		const label = document.getElementById("widener-width-val");
+		if (label) label.textContent = `${Math.round(dsp.stereoWidth * 100)}%`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	const reverbToggle = root.querySelector<HTMLInputElement>("#reverb-toggle");
+	reverbToggle?.addEventListener("change", () => {
+		dsp.reverbEnabled = reverbToggle.checked;
+		syncDspToEngines();
+		saveSettings();
+		sfx.toggle();
+		renderEqualizer(root);
+	});
+
+	for (const rBtn of root.querySelectorAll<HTMLButtonElement>(".reverb-p-btn")) {
+		rBtn.addEventListener("click", () => {
+			dsp.reverbPreset = rBtn.dataset.preset as any;
+			root.querySelectorAll(".reverb-p-btn").forEach((b) => b.classList.remove("active"));
+			rBtn.classList.add("active");
+			syncDspToEngines();
+			saveSettings();
+			sfx.click();
+		});
+	}
+
+	const reverbDecaySlider = root.querySelector<HTMLInputElement>("#reverb-decay-slider");
+	reverbDecaySlider?.addEventListener("input", () => {
+		dsp.reverbDecay = parseFloat(reverbDecaySlider.value);
+		const label = document.getElementById("reverb-decay-val");
+		if (label) label.textContent = `${dsp.reverbDecay.toFixed(1)} s`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	const reverbMixSlider = root.querySelector<HTMLInputElement>("#reverb-mix-slider");
+	reverbMixSlider?.addEventListener("input", () => {
+		dsp.reverbMix = parseFloat(reverbMixSlider.value);
+		const label = document.getElementById("reverb-mix-val");
+		if (label) label.textContent = `${Math.round(dsp.reverbMix * 100)}%`;
+		syncDspToEngines();
+		saveSettings();
+	});
+
+	// -------------------------------------------------------------
+	// REAL-TIME CANVASES & ANIMATION LOOP
+	// -------------------------------------------------------------
+	const scopeCanvas = root.querySelector<HTMLCanvasElement>("#studio-scope-canvas");
+	const curveCanvas = root.querySelector<HTMLCanvasElement>("#eq-curve-canvas");
+	const radarCanvas = root.querySelector<HTMLCanvasElement>("#radar-8d-canvas");
+	const tapeCurveCanvas = root.querySelector<HTMLCanvasElement>("#tape-curve-canvas");
+	const cassetteCanvas = root.querySelector<HTMLCanvasElement>("#cassette-reels-canvas");
+	const widenerPhaseCanvas = root.querySelector<HTMLCanvasElement>("#widener-phase-canvas");
+
+	// Setup Frequency Response Curve Interaction
+	if (curveCanvas) {
+		let isDraggingNode = false;
+		let dragIndex = -1;
+
+		const getCanvasCoord = (e: MouseEvent) => {
+			const rect = curveCanvas.getBoundingClientRect();
+			return {
+				x: (e.clientX - rect.left) * (curveCanvas.width / rect.width),
+				y: (e.clientY - rect.top) * (curveCanvas.height / rect.height),
+			};
+		};
+
+		curveCanvas.addEventListener("mousedown", (e) => {
+			const { x, y } = getCanvasCoord(e);
+			const w = curveCanvas.width;
+			const h = curveCanvas.height;
+			const minF = Math.log10(20);
+			const maxF = Math.log10(20000);
+
+			for (let i = 0; i < EQ_BANDS.length; i++) {
+				const f = EQ_BANDS[i]!;
+				const nodeX = ((Math.log10(f) - minF) / (maxF - minF)) * (w - 40) + 20;
+				const gain = dsp.eq[i] ?? 0;
+				const nodeY = h / 2 - (gain / 24) * (h / 2 - 15);
+				const dist = Math.hypot(x - nodeX, y - nodeY);
+				if (dist < 14) {
+					isDraggingNode = true;
+					dragIndex = i;
+					break;
+				}
+			}
+		});
+
+		window.addEventListener("mousemove", (e) => {
+			if (!isDraggingNode || dragIndex < 0) return;
+			const rect = curveCanvas.getBoundingClientRect();
+			const relY = (e.clientY - rect.top) / rect.height;
+			const clampedY = Math.max(0, Math.min(1, relY));
+			const gain = Math.round((0.5 - clampedY) * 48);
+			dsp.eq[dragIndex] = Math.max(-24, Math.min(24, gain));
+			state.settings.eq[dragIndex] = dsp.eq[dragIndex];
+			dsp.eqPreset = "Custom";
+			state.settings.eqPreset = "Custom";
+			syncDspToEngines();
+
+			const badge = document.getElementById(`eqv-${dragIndex}`);
+			if (badge) badge.textContent = `${gain > 0 ? "+" : ""}${gain} dB`;
+			const slider = root.querySelector<HTMLInputElement>(`.eq-slider-input[data-i="${dragIndex}"]`);
+			if (slider) {
+				slider.value = `${gain}`;
+				syncRangeFill(slider);
+			}
+		});
+
+		window.addEventListener("mouseup", () => {
+			if (isDraggingNode) {
+				isDraggingNode = false;
+				dragIndex = -1;
+				saveSettings();
+			}
+		});
+	}
+
+	// Setup Interactive Radar Canvas
+	if (radarCanvas) {
+		let isDraggingRadar = false;
+		const handleRadarMove = (e: MouseEvent) => {
+			const rect = radarCanvas.getBoundingClientRect();
+			const cx = rect.width / 2;
+			const cy = rect.height / 2;
+			const nx = (e.clientX - rect.left - cx) / cx;
+			const nz = (e.clientY - rect.top - cy) / cy;
+			dsp.spatial8dManual = true;
+			dsp.spatial8dManualX = Math.max(-1, Math.min(1, nx));
+			dsp.spatial8dManualZ = Math.max(-1, Math.min(1, nz));
+			syncDspToEngines();
+		};
+
+		radarCanvas.addEventListener("mousedown", (e) => {
+			isDraggingRadar = true;
+			handleRadarMove(e);
+		});
+		window.addEventListener("mousemove", (e) => {
+			if (isDraggingRadar) handleRadarMove(e);
+		});
+		window.addEventListener("mouseup", () => {
+			if (isDraggingRadar) {
+				isDraggingRadar = false;
+				saveSettings();
+			}
+		});
+		radarCanvas.addEventListener("dblclick", () => {
+			dsp.spatial8dManual = false;
+			syncDspToEngines();
+			sfx.toggle();
+			toast("Automated 8D orbital trajectory resumed", { ttl: 2000 });
+		});
+	}
+
+	// -------------------------------------------------------------
+	// MAIN 60FPS STUDIO ANIMATION LOOP
+	// -------------------------------------------------------------
+	let tapeReelAngle = 0;
+	let radarSweepAngle = 0;
+
+	const sampleFreqs = new Float32Array(256);
+	const minLog = Math.log10(20);
+	const maxLog = Math.log10(20000);
+	for (let i = 0; i < 256; i++) {
+		sampleFreqs[i] = Math.pow(10, minLog + (i / 255) * (maxLog - minLog));
+	}
+
+	const renderStudioFrame = () => {
+		if (!document.body.contains(root)) {
+			studioAnimRaf = null;
+			return;
+		}
+
+		const audioData = engine.getRealtimeAudioData(1024);
+
+		// 1. Update VU Meters & Clip Indicator
+		const meterL = document.getElementById("scope-meter-l");
+		const meterR = document.getElementById("scope-meter-r");
+		const valL = document.getElementById("scope-val-l");
+		const valR = document.getElementById("scope-val-r");
+		const clipLed = document.getElementById("scope-clip-led");
+
+		const dbL = audioData.rmsL > 0.0001 ? Math.max(-60, 20 * Math.log10(audioData.rmsL)) : -60;
+		const dbR = audioData.rmsR > 0.0001 ? Math.max(-60, 20 * Math.log10(audioData.rmsR)) : -60;
+		const pctL = Math.min(100, Math.max(0, ((dbL + 60) / 60) * 100));
+		const pctR = Math.min(100, Math.max(0, ((dbR + 60) / 60) * 100));
+
+		if (meterL) meterL.style.width = `${pctL}%`;
+		if (meterR) meterR.style.width = `${pctR}%`;
+		if (valL) valL.textContent = `${dbL.toFixed(1)} dB`;
+		if (valR) valR.textContent = `${dbR.toFixed(1)} dB`;
+		if (clipLed) {
+			if (audioData.peakL >= 0.98 || audioData.peakR >= 0.98) {
+				clipLed.classList.add("active");
+			} else {
+				clipLed.classList.remove("active");
+			}
+		}
+
+		// 2. Render Master Scope Canvas
+		if (scopeCanvas) {
+			if (scopeCanvas.width !== scopeCanvas.clientWidth) {
+				scopeCanvas.width = scopeCanvas.clientWidth;
+			}
+			const ctx = scopeCanvas.getContext("2d");
+			if (ctx) {
+				const w = scopeCanvas.width;
+				const h = scopeCanvas.height;
+
+				// Background clear with dark phosphor decay
+				ctx.fillStyle = "rgba(10, 8, 20, 0.35)";
+				ctx.fillRect(0, 0, w, h);
+
+				// Grid Lines
+				ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+				ctx.lineWidth = 1;
+				ctx.beginPath();
+				ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2);
+				ctx.moveTo(0, h / 4); ctx.lineTo(w, h / 4);
+				ctx.moveTo(0, (3 * h) / 4); ctx.lineTo(w, (3 * h) / 4);
+				for (let x = 0; x < w; x += 60) {
+					ctx.moveTo(x, 0); ctx.lineTo(x, h);
+				}
+				ctx.stroke();
+
+				if (activeScopeMode === "dual" || activeScopeMode === "spectrum") {
+					// Render Logarithmic Spectrum Bars
+					const freqBins = audioData.frequency;
+					const numBars = 84;
+					const barWidth = (w / numBars) - 1.5;
+					const barHScale = activeScopeMode === "dual" ? h * 0.48 : h * 0.88;
+					const baseY = h - 4;
+
+					for (let b = 0; b < numBars; b++) {
+						const logIdx = Math.floor(Math.pow(b / numBars, 1.6) * (freqBins.length - 1));
+						const val = (freqBins[logIdx] ?? 0) / 255;
+						const barHeight = Math.max(2, val * barHScale);
+						const x = b * (barWidth + 1.5) + 2;
+						const y = baseY - barHeight;
+
+						const grad = ctx.createLinearGradient(0, y, 0, baseY);
+						grad.addColorStop(0, "#00f3ff");
+						grad.addColorStop(0.5, "#a78bfa");
+						grad.addColorStop(1, "#ff2a85");
+
+						ctx.fillStyle = grad;
+						ctx.shadowColor = "#a78bfa";
+						ctx.shadowBlur = val > 0.6 ? 8 : 2;
+						ctx.fillRect(x, y, barWidth, barHeight);
+					}
+					ctx.shadowBlur = 0;
+				}
+
+				if (activeScopeMode === "dual" || activeScopeMode === "scope") {
+					// Render Oscilloscope Time-Domain Waveform
+					const timeBuf = audioData.timeDomain;
+					const waveYOffset = activeScopeMode === "dual" ? h * 0.28 : h * 0.5;
+					const waveHeight = activeScopeMode === "dual" ? h * 0.24 : h * 0.45;
+
+					ctx.lineWidth = 2;
+					ctx.strokeStyle = "#00f3ff";
+					ctx.shadowColor = "rgba(0, 243, 255, 0.8)";
+					ctx.shadowBlur = 10;
+					ctx.beginPath();
+
+					const slice = w / timeBuf.length;
+					for (let i = 0; i < timeBuf.length; i++) {
+						const v = (timeBuf[i]! - 128) / 128;
+						const y = waveYOffset + v * waveHeight;
+						const x = i * slice;
+						if (i === 0) ctx.moveTo(x, y);
+						else ctx.lineTo(x, y);
+					}
+					ctx.stroke();
+					ctx.shadowBlur = 0;
+				}
+
+				if (activeScopeMode === "phase") {
+					// Render Lissajous Phase Scope
+					const timeBuf = audioData.timeDomain;
+					const cx = w / 2;
+					const cy = h / 2;
+					const scale = Math.min(w, h) * 0.42;
+
+					ctx.lineWidth = 1.5;
+					ctx.strokeStyle = "#ff2a85";
+					ctx.shadowColor = "#ff2a85";
+					ctx.shadowBlur = 8;
+					ctx.beginPath();
+
+					for (let i = 0; i < timeBuf.length - 2; i += 2) {
+						const l = (timeBuf[i]! - 128) / 128;
+						const r = (timeBuf[i + 1]! - 128) / 128;
+						const px = cx + (l - r) * 0.707 * scale;
+						const py = cy - (l + r) * 0.707 * scale;
+						if (i === 0) ctx.moveTo(px, py);
+						else ctx.lineTo(px, py);
+					}
+					ctx.stroke();
+					ctx.shadowBlur = 0;
+				}
+			}
+		}
+
+		// 3. Render Frequency Response Curve Canvas
+		if (curveCanvas && activeStudioTab === "eq") {
+			if (curveCanvas.width !== curveCanvas.clientWidth) {
+				curveCanvas.width = curveCanvas.clientWidth;
+			}
+			const ctx = curveCanvas.getContext("2d");
+			if (ctx) {
+				const w = curveCanvas.width;
+				const h = curveCanvas.height;
+				ctx.clearRect(0, 0, w, h);
+
+				// Background
+				ctx.fillStyle = "rgba(12, 10, 24, 0.7)";
+				ctx.fillRect(0, 0, w, h);
+
+				// Guide Lines
+				ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+				ctx.lineWidth = 1;
+				ctx.beginPath();
+				const midY = h / 2;
+				ctx.moveTo(0, midY); ctx.lineTo(w, midY); // 0 dB line
+				ctx.moveTo(0, midY - (12 / 24) * (midY - 15)); ctx.lineTo(w, midY - (12 / 24) * (midY - 15)); // +12 dB
+				ctx.moveTo(0, midY + (12 / 24) * (midY - 15)); ctx.lineTo(w, midY + (12 / 24) * (midY - 15)); // -12 dB
+				ctx.stroke();
+
+				// Evaluate Biquad Filter Response Curve
+				const dbs = engine.getBiquadFrequencyResponse(sampleFreqs);
+
+				// Draw Gradient Area Under Curve
+				ctx.beginPath();
+				ctx.moveTo(20, midY);
+				for (let i = 0; i < sampleFreqs.length; i++) {
+					const x = (i / (sampleFreqs.length - 1)) * (w - 40) + 20;
+					const y = midY - (dbs[i]! / 24) * (midY - 15);
+					ctx.lineTo(x, y);
+				}
+				ctx.lineTo(w - 20, midY);
+				ctx.closePath();
+
+				const fillGrad = ctx.createLinearGradient(0, 10, 0, h - 10);
+				fillGrad.addColorStop(0, "rgba(167, 139, 250, 0.45)");
+				fillGrad.addColorStop(0.5, "rgba(255, 42, 133, 0.15)");
+				fillGrad.addColorStop(1, "rgba(0, 243, 255, 0.02)");
+				ctx.fillStyle = fillGrad;
+				ctx.fill();
+
+				// Draw Curve Line
+				ctx.beginPath();
+				for (let i = 0; i < sampleFreqs.length; i++) {
+					const x = (i / (sampleFreqs.length - 1)) * (w - 40) + 20;
+					const y = midY - (dbs[i]! / 24) * (midY - 15);
+					if (i === 0) ctx.moveTo(x, y);
+					else ctx.lineTo(x, y);
+				}
+				ctx.strokeStyle = "#a78bfa";
+				ctx.lineWidth = 2.5;
+				ctx.shadowColor = "#ff2a85";
+				ctx.shadowBlur = 10;
+				ctx.stroke();
+				ctx.shadowBlur = 0;
+
+				// Draw 10 Frequency Band Node Circles
+				for (let i = 0; i < EQ_BANDS.length; i++) {
+					const f = EQ_BANDS[i]!;
+					const nodeX = ((Math.log10(f) - minLog) / (maxLog - minLog)) * (w - 40) + 20;
+					const gain = dsp.eq[i] ?? 0;
+					const nodeY = midY - (gain / 24) * (midY - 15);
+
+					ctx.beginPath();
+					ctx.arc(nodeX, nodeY, 5.5, 0, 2 * Math.PI);
+					ctx.fillStyle = "#ffffff";
+					ctx.shadowColor = "#00f3ff";
+					ctx.shadowBlur = 10;
+					ctx.fill();
+					ctx.strokeStyle = "#a78bfa";
+					ctx.lineWidth = 2;
+					ctx.stroke();
+					ctx.shadowBlur = 0;
+				}
+			}
+		}
+
+		// 4. Render 3D Binaural Radar Canvas
+		if (radarCanvas && activeStudioTab === "spatial") {
+			const ctx = radarCanvas.getContext("2d");
+			if (ctx) {
+				const w = radarCanvas.width;
+				const h = radarCanvas.height;
+				const cx = w / 2;
+				const cy = h / 2;
+				const rMax = w / 2 - 12;
+
+				ctx.clearRect(0, 0, w, h);
+
+				// Dark Radar Backdrop
+				ctx.fillStyle = "rgba(10, 8, 22, 0.9)";
+				ctx.beginPath();
+				ctx.arc(cx, cy, rMax, 0, 2 * Math.PI);
+				ctx.fill();
+
+				// Concentric Distance Rings
+				ctx.strokeStyle = "rgba(0, 243, 255, 0.22)";
+				ctx.lineWidth = 1;
+				[0.25, 0.5, 0.75, 1.0].forEach((ratio) => {
+					ctx.beginPath();
+					ctx.arc(cx, cy, rMax * ratio, 0, 2 * Math.PI);
+					ctx.stroke();
+				});
+
+				// Crosshair axes
+				ctx.beginPath();
+				ctx.moveTo(cx, cy - rMax); ctx.lineTo(cx, cy + rMax);
+				ctx.moveTo(cx - rMax, cy); ctx.lineTo(cx + rMax, cy);
+				ctx.stroke();
+
+				// Spinning Radar Phosphor Beam
+				if (dsp.spatial8dEnabled && !dsp.spatial8dManual) {
+					radarSweepAngle = (radarSweepAngle + 0.035) % (2 * Math.PI);
+					ctx.save();
+					ctx.translate(cx, cy);
+					ctx.rotate(radarSweepAngle);
+					const beamGrad = ctx.createLinearGradient(0, 0, rMax, 0);
+					beamGrad.addColorStop(0, "rgba(0, 243, 255, 0.4)");
+					beamGrad.addColorStop(1, "rgba(0, 243, 255, 0)");
+					ctx.fillStyle = beamGrad;
+					ctx.beginPath();
+					ctx.moveTo(0, 0);
+					ctx.arc(0, 0, rMax, -0.3, 0);
+					ctx.closePath();
+					ctx.fill();
+					ctx.restore();
+				}
+
+				// Sound Source Particle Coordinates
+				const coords = engine.getSpatialCoordinates();
+				const coordLabel = document.getElementById("radar-coords-label");
+				if (coordLabel) {
+					const deg = Math.round((coords.angle * 180) / Math.PI) % 360;
+					coordLabel.textContent = `X: ${coords.x > 0 ? "+" : ""}${coords.x.toFixed(1)}m | Z: ${coords.z > 0 ? "+" : ""}${coords.z.toFixed(1)}m | θ: ${deg}°`;
+				}
+
+				// Plot Orbiting Sound Source Orb
+				const px = cx + (coords.x / 10) * rMax;
+				const pz = cy + (coords.z / 10) * rMax;
+
+				// Particle Halo
+				ctx.beginPath();
+				ctx.arc(px, pz, 10, 0, 2 * Math.PI);
+				ctx.fillStyle = "rgba(255, 42, 133, 0.35)";
+				ctx.fill();
+
+				// Particle Core
+				ctx.beginPath();
+				ctx.arc(px, pz, 5.5, 0, 2 * Math.PI);
+				ctx.fillStyle = "#ffffff";
+				ctx.shadowColor = "#ff2a85";
+				ctx.shadowBlur = 14;
+				ctx.fill();
+				ctx.shadowBlur = 0;
+			}
+		}
+
+		// 5. Render Cassette Tape Animation Canvas
+		if (cassetteCanvas && activeStudioTab === "lofi") {
+			const ctx = cassetteCanvas.getContext("2d");
+			if (ctx) {
+				const w = cassetteCanvas.width;
+				const h = cassetteCanvas.height;
+				ctx.clearRect(0, 0, w, h);
+
+				if (!engine.paused) {
+					tapeReelAngle = (tapeReelAngle + 0.04 * (state.settings.speed || 1)) % (2 * Math.PI);
+				}
+
+				// Dual Reel Spindles
+				[60, w - 60].forEach((rx) => {
+					ctx.save();
+					ctx.translate(rx, h / 2);
+					ctx.rotate(tapeReelAngle);
+
+					// Outer Hub
+					ctx.beginPath();
+					ctx.arc(0, 0, 22, 0, 2 * Math.PI);
+					ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
+					ctx.fill();
+					ctx.strokeStyle = "rgba(244, 114, 182, 0.6)";
+					ctx.lineWidth = 1.5;
+					ctx.stroke();
+
+					// Inner spokes
+					for (let s = 0; s < 3; s++) {
+						ctx.rotate((2 * Math.PI) / 3);
+						ctx.beginPath();
+						ctx.moveTo(0, 0); ctx.lineTo(18, 0);
+						ctx.stroke();
+					}
+					ctx.restore();
+				});
+
+				// Tape ribbon span
+				ctx.beginPath();
+				ctx.moveTo(60, h / 2 + 18);
+				ctx.lineTo(w - 60, h / 2 + 18);
+				ctx.strokeStyle = "rgba(167, 139, 250, 0.4)";
+				ctx.lineWidth = 2;
+				ctx.stroke();
+			}
+		}
+
+		// 6. Render Tape Saturation Transfer Curve
+		if (tapeCurveCanvas && activeStudioTab === "lofi") {
+			const ctx = tapeCurveCanvas.getContext("2d");
+			if (ctx) {
+				const w = tapeCurveCanvas.width;
+				const h = tapeCurveCanvas.height;
+				ctx.clearRect(0, 0, w, h);
+
+				ctx.fillStyle = "rgba(12, 10, 22, 0.8)";
+				ctx.fillRect(0, 0, w, h);
+
+				ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
+				ctx.beginPath();
+				ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2);
+				ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h);
+				ctx.stroke();
+
+				// Plot soft-knee saturation
+				ctx.beginPath();
+				const warmth = dsp.lofiWarmth;
+				const k = warmth * 3.5;
+				for (let x = 0; x < w; x++) {
+					const inVal = ((x / (w - 1)) * 2 - 1);
+					const x2 = inVal + 0.12 * inVal * inVal;
+					const sat = Math.tanh(x2 * (1 + k)) / Math.tanh(1 + k);
+					const y = h / 2 - sat * (h / 2 - 8);
+					if (x === 0) ctx.moveTo(x, y);
+					else ctx.lineTo(x, y);
+				}
+				ctx.strokeStyle = "#f472b6";
+				ctx.lineWidth = 2;
+				ctx.stroke();
+			}
+		}
+
+		// 7. Render Haas Widener Phase Scope Canvas
+		if (widenerPhaseCanvas && activeStudioTab === "hall") {
+			const ctx = widenerPhaseCanvas.getContext("2d");
+			if (ctx) {
+				const w = widenerPhaseCanvas.width;
+				const h = widenerPhaseCanvas.height;
+				ctx.clearRect(0, 0, w, h);
+
+				ctx.fillStyle = "rgba(12, 10, 22, 0.8)";
+				ctx.fillRect(0, 0, w, h);
+
+				const widthRatio = dsp.widenerEnabled ? dsp.stereoWidth : 1.0;
+				const cx = w / 2;
+				const cy = h / 2;
+
+				ctx.strokeStyle = "rgba(0, 243, 255, 0.6)";
+				ctx.lineWidth = 2;
+				ctx.beginPath();
+				ctx.ellipse(cx, cy, Math.max(10, widthRatio * 45), 25, 0, 0, 2 * Math.PI);
+				ctx.stroke();
+			}
+		}
+
+		studioAnimRaf = requestAnimationFrame(renderStudioFrame);
+	};
+
+	studioAnimRaf = requestAnimationFrame(renderStudioFrame);
+}
+
+
+// ---------- Custom Playlist Art Generator & Playlist Manager ----------
+type ArtThemePreset = "sakura_sunset" | "cyber_neotokyo" | "ghibli_emerald" | "midnight_shogun" | "ocean_shinkai" | "retro_synthwave";
+
+const ART_THEMES: Record<ArtThemePreset, { name: string; bg1: string; bg2: string; bg3: string; accent: string; iconRing: string }> = {
+	sakura_sunset:   { name: "🌸 Sakura Sunset",   bg1: "#2b0a1f", bg2: "#831843", bg3: "#f472b6", accent: "#fbcfe8", iconRing: "rgba(244, 114, 182, 0.4)" },
+	cyber_neotokyo:  { name: "⚡ Cyber NeoTokyo",  bg1: "#060913", bg2: "#1e1b4b", bg3: "#06b6d4", accent: "#22d3ee", iconRing: "rgba(6, 182, 212, 0.45)" },
+	ghibli_emerald:  { name: "🍃 Ghibli Emerald",  bg1: "#022c22", bg2: "#065f46", bg3: "#10b981", accent: "#6ee7b7", iconRing: "rgba(16, 185, 129, 0.4)" },
+	midnight_shogun: { name: "⚔️ Midnight Shogun", bg1: "#09090b", bg2: "#312e81", bg3: "#6366f1", accent: "#a5b4fc", iconRing: "rgba(99, 102, 241, 0.45)" },
+	ocean_shinkai:   { name: "🌊 Ocean Shinkai",   bg1: "#030712", bg2: "#0c4a6e", bg3: "#0284c7", accent: "#38bdf8", iconRing: "rgba(2, 132, 199, 0.45)" },
+	retro_synthwave: { name: "🌆 Retro Synthwave", bg1: "#180428", bg2: "#701a75", bg3: "#fb923c", accent: "#fde047", iconRing: "rgba(251, 146, 60, 0.45)" },
+};
+
+function renderArtOnCanvas(
+	canvas: HTMLCanvasElement,
+	opts: {
+		title: string;
+		subtitle: string;
+		theme: ArtThemePreset;
+		emblem: string;
+		customImg?: HTMLImageElement | null;
+	}
+) {
+	const ctx = canvas.getContext("2d");
+	if (!ctx) return;
+	const W = canvas.width;
+	const H = canvas.height;
+	const t = ART_THEMES[opts.theme] ?? ART_THEMES.sakura_sunset;
+
+	ctx.clearRect(0, 0, W, H);
+
+	// 1. Background Gradient
+	const grad = ctx.createLinearGradient(0, 0, W, H);
+	grad.addColorStop(0, t.bg1);
+	grad.addColorStop(0.55, t.bg2);
+	grad.addColorStop(1, t.bg3);
+	ctx.fillStyle = grad;
+	ctx.fillRect(0, 0, W, H);
+
+	// 2. Custom Image Overlay or Themed Generative Elements
+	if (opts.customImg && opts.customImg.complete) {
+		ctx.save();
+		ctx.globalAlpha = 0.45;
+		ctx.drawImage(opts.customImg, 0, 0, W, H);
+		ctx.restore();
+	} else {
+		// Generative art elements per theme
+		ctx.save();
+		if (opts.theme === "cyber_neotokyo" || opts.theme === "retro_synthwave") {
+			// Perspective grid
+			ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+			ctx.lineWidth = 1.5;
+			const horizon = H * 0.62;
+			for (let y = horizon; y <= H; y += (y - horizon + 12) * 0.4) {
+				ctx.beginPath();
+				ctx.moveTo(0, y);
+				ctx.lineTo(W, y);
+				ctx.stroke();
+			}
+			for (let x = -W * 0.5; x <= W * 1.5; x += 48) {
+				ctx.beginPath();
+				ctx.moveTo(W * 0.5, horizon);
+				ctx.lineTo(x, H);
+				ctx.stroke();
+			}
+		} else if (opts.theme === "sakura_sunset") {
+			// Floating sakura petals
+			ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+			for (let i = 0; i < 18; i++) {
+				const px = (i * 37 + 23) % W;
+				const py = (i * 47 + 51) % (H * 0.7);
+				const pr = 6 + (i % 5);
+				ctx.beginPath();
+				ctx.ellipse(px, py, pr * 1.8, pr, Math.PI / 4 + i * 0.2, 0, Math.PI * 2);
+				ctx.fill();
+			}
+		} else if (opts.theme === "ocean_shinkai") {
+			// Caustic circles
+			ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+			ctx.lineWidth = 2;
+			for (let r = 60; r <= 280; r += 40) {
+				ctx.beginPath();
+				ctx.arc(W * 0.5, H * 0.45, r, 0, Math.PI * 2);
+				ctx.stroke();
+			}
+		}
+		ctx.restore();
+	}
+
+	// 3. Central Emblem Stage
+	const cx = W * 0.5;
+	const cy = H * 0.42;
+	const ringR = 88;
+
+	// Outer Glow
+	const radial = ctx.createRadialGradient(cx, cy, 30, cx, cy, ringR * 1.4);
+	radial.addColorStop(0, t.iconRing);
+	radial.addColorStop(1, "transparent");
+	ctx.fillStyle = radial;
+	ctx.beginPath();
+	ctx.arc(cx, cy, ringR * 1.4, 0, Math.PI * 2);
+	ctx.fill();
+
+	// Glass Emblem Circle
+	ctx.save();
+	ctx.fillStyle = "rgba(10, 10, 20, 0.65)";
+	ctx.strokeStyle = t.accent;
+	ctx.lineWidth = 4;
+	ctx.beginPath();
+	ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+	ctx.fill();
+	ctx.stroke();
+
+	// Emblem Emoji / Icon
+	ctx.font = "76px sans-serif";
+	ctx.textAlign = "center";
+	ctx.textBaseline = "middle";
+	ctx.fillText(opts.emblem || "🌸", cx, cy + 4);
+	ctx.restore();
+
+	// 4. Cel-Shaded Typography (Title + Subtitle)
+	ctx.save();
+	ctx.textAlign = "center";
+	
+	// Top Header Tag
+	ctx.font = "bold 16px 'Space Grotesk', system-ui, sans-serif";
+	ctx.fillStyle = t.accent;
+	ctx.letterSpacing = "4px";
+	ctx.fillText("LAKKY PLAYLIST", cx, 64);
+
+	// Main Title
+	const titleText = opts.title.trim() || "Untitled Playlist";
+	ctx.font = "bold 34px 'Plus Jakarta Sans', system-ui, sans-serif";
+	// Shadow / Cel Outline
+	ctx.lineWidth = 7;
+	ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
+	ctx.strokeText(titleText.slice(0, 22), cx, H - 76);
+	ctx.fillStyle = "#ffffff";
+	ctx.fillText(titleText.slice(0, 22), cx, H - 76);
+
+	// Subtitle
+	const subText = opts.subtitle.trim() || `${t.name.split(" ")[1] || "Curated"} Collection`;
+	ctx.font = "500 15px 'Plus Jakarta Sans', system-ui, sans-serif";
+	ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
+	ctx.fillText(subText.slice(0, 36), cx, H - 42);
+	ctx.restore();
+}
+
+function openPlaylistArtGenerator(
+	existing?: { name: string; artDataUrl?: string; description?: string; ids: string[] },
+	onSave?: (name: string, artDataUrl: string, description: string) => void
+) {
+	let curTheme: ArtThemePreset = "sakura_sunset";
+	let curEmblem = "🌸";
+	let curTitle = existing?.name ?? "My Favorite Anime Tracks";
+	let curDesc = existing?.description ?? "A curated collection in Lakky Player";
+	let customImg: HTMLImageElement | null = null;
+
+	const emblems = ["🌸", "💿", "🎵", "⚡", "⚔️", "🎧", "🌙", "💖", "🌌", "📼", "🔥", "📻"];
+
+	const overlay = document.createElement("div");
+	overlay.className = "modal-overlay art-generator-modal";
+	overlay.innerHTML = `
+		<div class="modal art-gen-modal-body">
+			<div class="art-gen-layout">
+				<div class="art-gen-preview-pane">
+					<div class="art-canvas-frame">
+						<canvas id="art-gen-canvas" width="512" height="512"></canvas>
+					</div>
+					<div class="art-gen-quick-actions">
+						<button class="btn btn-ghost btn-sm" id="btn-art-randomize">${icons.dice}<span>Randomize</span></button>
+						<label class="btn btn-ghost btn-sm" style="cursor:pointer">
+							${icons.upload}<span>Upload Image</span>
+							<input type="file" id="art-file-input" accept="image/*" style="display:none" />
+						</label>
+					</div>
+				</div>
+
+				<div class="art-gen-controls-pane">
+					<h3>${existing ? "Edit Playlist & Cover Art" : "Create New Playlist"}</h3>
+					<p class="modal-note">Generate custom cel-shaded vector art for your playlist.</p>
+
+					<label>Playlist Name
+						<input type="text" id="art-input-title" value="${escapeHtml(curTitle)}" placeholder="e.g. Neo Tokyo Nights" />
+					</label>
+
+					<label>Description / Subtitle
+						<input type="text" id="art-input-desc" value="${escapeHtml(curDesc)}" placeholder="e.g. Best Lo-Fi & Synthwave" />
+					</label>
+
+					<label>Theme Style</label>
+					<div class="art-theme-selector">
+						${(Object.keys(ART_THEMES) as ArtThemePreset[]).map((k) => `
+							<button class="art-theme-btn ${k === curTheme ? "active" : ""}" data-theme="${k}">
+								${ART_THEMES[k].name}
+							</button>
+						`).join("")}
+					</div>
+
+					<label style="margin-top:0.8rem">Emblem Icon</label>
+					<div class="art-emblem-selector">
+						${emblems.map((em) => `
+							<button class="art-emblem-btn ${em === curEmblem ? "active" : ""}" data-emblem="${em}">${em}</button>
+						`).join("")}
+					</div>
+
+					<div class="modal-actions" style="margin-top:1.5rem">
+						<button class="btn btn-ghost" id="art-gen-cancel">Cancel</button>
+						<button class="btn btn-primary" id="art-gen-save">${icons.check}<span>${existing ? "Save Changes" : "Create Playlist"}</span></button>
+					</div>
+				</div>
+			</div>
+		</div>
+	`;
+	document.body.appendChild(overlay);
+
+	const canvas = overlay.querySelector("#art-gen-canvas") as HTMLCanvasElement;
+	const redraw = () => {
+		renderArtOnCanvas(canvas, {
+			title: curTitle,
+			subtitle: curDesc,
+			theme: curTheme,
+			emblem: curEmblem,
+			customImg,
+		});
+	};
+	redraw();
+
+	const titleInput = overlay.querySelector("#art-input-title") as HTMLInputElement;
+	const descInput = overlay.querySelector("#art-input-desc") as HTMLInputElement;
+
+	titleInput.addEventListener("input", () => {
+		curTitle = titleInput.value;
+		redraw();
+	});
+	descInput.addEventListener("input", () => {
+		curDesc = descInput.value;
+		redraw();
+	});
+
+	for (const btn of overlay.querySelectorAll<HTMLButtonElement>(".art-theme-btn")) {
+		btn.addEventListener("click", () => {
+			for (const b of overlay.querySelectorAll(".art-theme-btn")) b.classList.remove("active");
+			btn.classList.add("active");
+			curTheme = btn.dataset.theme as ArtThemePreset;
+			sfx.toggle();
+			redraw();
+		});
+	}
+
+	for (const btn of overlay.querySelectorAll<HTMLButtonElement>(".art-emblem-btn")) {
+		btn.addEventListener("click", () => {
+			for (const b of overlay.querySelectorAll(".art-emblem-btn")) b.classList.remove("active");
+			btn.classList.add("active");
+			curEmblem = btn.dataset.emblem!;
+			sfx.click();
+			redraw();
+		});
+	}
+
+	overlay.querySelector("#btn-art-randomize")?.addEventListener("click", () => {
+		const themeKeys = Object.keys(ART_THEMES) as ArtThemePreset[];
+		curTheme = themeKeys[Math.floor(Math.random() * themeKeys.length)];
+		curEmblem = emblems[Math.floor(Math.random() * emblems.length)];
+		for (const b of overlay.querySelectorAll(".art-theme-btn")) {
+			b.classList.toggle("active", (b as HTMLElement).dataset.theme === curTheme);
+		}
+		for (const b of overlay.querySelectorAll(".art-emblem-btn")) {
+			b.classList.toggle("active", (b as HTMLElement).dataset.emblem === curEmblem);
+		}
+		sfx.success();
+		redraw();
+	});
+
+	overlay.querySelector("#art-file-input")?.addEventListener("change", (e) => {
+		const f = (e.target as HTMLInputElement).files?.[0];
+		if (!f) return;
+		const reader = new FileReader();
+		reader.onload = () => {
+			const img = new Image();
+			img.onload = () => {
+				customImg = img;
+				redraw();
+			};
+			img.src = reader.result as string;
+		};
+		reader.readAsDataURL(f);
+	});
+
+	const cleanup = () => overlay.remove();
+	overlay.querySelector("#art-gen-cancel")?.addEventListener("click", cleanup);
+	overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(); });
+
+	overlay.querySelector("#art-gen-save")?.addEventListener("click", async () => {
+		const name = curTitle.trim() || "Untitled Playlist";
+		const artDataUrl = canvas.toDataURL("image/png");
+		const desc = curDesc.trim();
+
+		if (onSave) {
+			onSave(name, artDataUrl, desc);
+		} else if (existing) {
+			existing.name = name;
+			existing.artDataUrl = artDataUrl;
+			existing.description = desc;
+			await savePlaylists();
+			toast(`Updated "${name}"`, { ttl: 2000 });
+		} else {
+			state.playlists.push({
+				name,
+				ids: [],
+				artDataUrl,
+				description: desc,
+			});
+			await savePlaylists();
+			state.activePlaylistName = name;
+			toast(`Created playlist "${name}"`, { ttl: 2200 });
+			sfx.success();
+		}
+		cleanup();
+		renderMain();
+		renderSidebarPlaylists();
+	});
+}
+
+function openAddTracksToPlaylistModal(playlistName: string) {
+	const pl = state.playlists.find((p) => p.name === playlistName);
+	if (!pl) return;
+
+	const overlay = document.createElement("div");
+	overlay.className = "modal-overlay";
+	overlay.innerHTML = `
+		<div class="modal add-tracks-modal-body">
+			<h3>Add Tracks to "${escapeHtml(pl.name)}"</h3>
+			<p class="modal-note">Click any track to instantly add it to this playlist.</p>
+			
+			<div class="search-wrap cel-search" style="margin-bottom:1rem">
+				${icons.search}
+				<input class="search" id="modal-track-search" placeholder="Filter library tracks…" />
+			</div>
+
+			<div class="modal-track-checklist" id="modal-track-list">
+				${renderModalTrackChecklist(pl)}
+			</div>
+
+			<div class="modal-actions" style="margin-top:1.2rem">
+				<button class="btn btn-primary" id="modal-add-done">Done</button>
+			</div>
+		</div>
+	`;
+	document.body.appendChild(overlay);
+
+	const cleanup = () => overlay.remove();
+	overlay.querySelector("#modal-add-done")?.addEventListener("click", cleanup);
+	overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(); });
+
+	const wireChecklist = () => {
+		for (const row of overlay.querySelectorAll<HTMLDivElement>(".modal-track-item")) {
+			row.addEventListener("click", async () => {
+				const id = row.dataset.id!;
+				if (!pl.ids.includes(id)) {
+					pl.ids.push(id);
+					await savePlaylists();
+					sfx.click();
+					row.classList.add("added");
+					row.querySelector(".modal-track-status")!.innerHTML = `${icons.check} Added`;
+				}
+			});
+		}
+	};
+	wireChecklist();
+
+	const searchInput = overlay.querySelector("#modal-track-search") as HTMLInputElement;
+	searchInput.addEventListener("input", () => {
+		const q = searchInput.value.toLowerCase().trim();
+		const mount = overlay.querySelector("#modal-track-list") as HTMLElement;
+		if (mount) {
+			mount.innerHTML = renderModalTrackChecklist(pl, q);
+			wireChecklist();
+		}
+	});
+}
+
+function renderModalTrackChecklist(pl: { name: string; ids: string[] }, q = ""): string {
+	let tracks = state.library;
+	if (q) {
+		tracks = tracks.filter((t) => [t.title, t.artist, t.album].some((s) => s.toLowerCase().includes(q)));
+	}
+	if (tracks.length === 0) {
+		return `<div style="text-align:center;padding:2rem;color:rgba(255,255,255,0.4)">No tracks found.</div>`;
+	}
+	return tracks.map((t) => {
+		const isAdded = pl.ids.includes(t.id);
+		return `
+			<div class="modal-track-item ${isAdded ? "added" : ""}" data-id="${t.id}">
+				<div class="modal-track-art">${t.artDataUrl ? `<img src="${t.artDataUrl}" alt="">` : icons.musicNote}</div>
+				<div class="modal-track-info">
+					<div class="modal-track-title">${escapeHtml(t.title)}</div>
+					<div class="modal-track-artist">${escapeHtml(t.artist)} • ${escapeHtml(t.album)}</div>
+				</div>
+				<div class="modal-track-status">${isAdded ? `${icons.check} Added` : `${icons.plus} Add`}</div>
+			</div>
+		`;
+	}).join("");
+}
+
+// ---------- Overhauled Playlists View ----------
+function renderPlaylists(root: HTMLElement) {
+	// If a specific playlist is active, render its detail view
+	if (state.activePlaylistName) {
+		const pl = state.playlists.find((p) => p.name === state.activePlaylistName);
+		if (pl) {
+			renderPlaylistDetail(root, pl);
+			return;
+		} else {
+			state.activePlaylistName = null;
+		}
+	}
+
+	const q = state.playlistSearchQuery.toLowerCase().trim();
+	const playlists = q
+		? state.playlists.filter((p) => p.name.toLowerCase().includes(q) || (p.description ?? "").toLowerCase().includes(q))
+		: state.playlists;
+
+	root.innerHTML = `
+		<div class="playlists-view-container">
+			<div class="topbar">
+				<h2>Playlists</h2>
+				<div class="topbar-actions">
+					<div class="search-wrap cel-search">
+						${icons.search}
+						<input class="search" id="pl-search-input" placeholder="Search playlists…" value="${escapeHtml(state.playlistSearchQuery)}" />
+					</div>
+					<button class="btn" id="btn-import-pl">${icons.folder}<span>Import M3U…</span></button>
+					<button class="btn btn-primary" id="btn-new-pl-art">${icons.palette}<span>Create Playlist</span></button>
+				</div>
+			</div>
+
+			${playlists.length === 0 ? `
+				<div class="empty-table-state" style="padding:5rem 2rem">
+					<div class="empty-icon">${icons.list}</div>
+					<p class="empty-text">${q ? "No playlists match your search." : "You haven't made any playlists yet."}</p>
+					<button class="btn btn-primary" id="btn-empty-create-pl" style="margin-top:1rem">${icons.palette}<span>Create Your First Playlist</span></button>
+				</div>
+			` : `
+				<div class="cel-playlist-grid">
+					${playlists.map((p) => {
+						const tracks = p.ids.map((id) => state.library.find((t) => t.id === id)).filter((x): x is TrackInfo => !!x);
+						const totalDur = formatDurationSum(tracks);
+						return `
+							<div class="playlist-cel-card" data-pl="${escapeHtml(p.name)}">
+								<div class="playlist-art-stage">
+									${p.artDataUrl ? `
+										<img src="${p.artDataUrl}" alt="${escapeHtml(p.name)}" class="playlist-cover-img" loading="lazy" />
+									` : `
+										<div class="playlist-cover-fallback">
+											<span class="pl-fallback-icon">${icons.list}</span>
+										</div>
+									`}
+									<div class="playlist-glass-shine"></div>
+									<div class="playlist-hover-overlay">
+										<button class="playlist-hover-play-btn" title="Play Playlist">${icons.play}</button>
+										<button class="playlist-hover-shuffle-btn" title="Shuffle Playlist">${icons.shuffle}</button>
+									</div>
+								</div>
+								<div class="playlist-card-info">
+									<h4 class="playlist-card-title" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</h4>
+									<p class="playlist-card-desc">${escapeHtml(p.description || `${p.ids.length} tracks`)}</p>
+									<div class="playlist-card-meta">
+										<span>${p.ids.length} track${p.ids.length === 1 ? "" : "s"}</span>
+										<span>•</span>
+										<span>${totalDur}</span>
+									</div>
+								</div>
+							</div>
+						`;
+					}).join("")}
+				</div>
+			`}
+		</div>
+	`;
+
+	// Wire Create Playlist buttons
+	const openCreate = () => openPlaylistArtGenerator();
+	document.getElementById("btn-new-pl-art")?.addEventListener("click", openCreate);
+	document.getElementById("btn-empty-create-pl")?.addEventListener("click", openCreate);
+
+	// Wire Import M3U
 	document.getElementById("btn-import-pl")?.addEventListener("click", async () => {
 		sfx.open();
 		try {
 			const r = await bun().importPlaylist({});
-			if (!r.name) return; // cancelled
-			// Make sure imported tracks live in the library too.
+			if (!r.name) return;
 			mergeIntoLibrary(r.tracks);
 			state.playlists.push({
 				name: r.name,
@@ -2471,50 +5880,187 @@ function renderPlaylists(root: HTMLElement) {
 		}
 	});
 
-	for (const c of document.querySelectorAll<HTMLDivElement>(".card[data-pl]")) {
-		c.addEventListener("click", () => {
-			const name = c.dataset.pl!;
-			const pl = state.playlists.find((p) => p.name === name);
-			if (!pl || pl.ids.length === 0) {
-				toast("This playlist is empty. Add tracks from your library.", { ttl: 3000 });
-				return;
-			}
+	// Wire Search
+	const plSearch = document.getElementById("pl-search-input") as HTMLInputElement | null;
+	plSearch?.addEventListener("input", () => {
+		state.playlistSearchQuery = plSearch.value;
+		renderPlaylists(root);
+		const input = document.getElementById("pl-search-input") as HTMLInputElement | null;
+		if (input) {
+			input.focus();
+			input.setSelectionRange(input.value.length, input.value.length);
+		}
+	});
+
+	// Wire Playlist Cards
+	for (const card of root.querySelectorAll<HTMLDivElement>(".playlist-cel-card")) {
+		const name = card.dataset.pl!;
+		const pl = state.playlists.find((p) => p.name === name);
+		if (!pl) continue;
+
+		card.querySelector(".playlist-hover-play-btn")?.addEventListener("click", (e) => {
+			e.stopPropagation();
 			const tracks = pl.ids.map((id) => state.library.find((t) => t.id === id)).filter((x): x is TrackInfo => !!x);
 			if (tracks.length > 0) {
 				playFromList(tracks, 0);
 				sfx.play();
+			} else {
+				toast("Playlist is empty.", { ttl: 2000 });
 			}
 		});
-		c.addEventListener("contextmenu", async (e) => {
+
+		card.querySelector(".playlist-hover-shuffle-btn")?.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const tracks = pl.ids.map((id) => state.library.find((t) => t.id === id)).filter((x): x is TrackInfo => !!x);
+			if (tracks.length > 0) {
+				state.settings.shuffle = true;
+				playFromList(tracks, Math.floor(Math.random() * tracks.length));
+				sfx.success();
+			}
+		});
+
+		card.addEventListener("click", () => {
+			state.activePlaylistName = name;
+			sfx.click();
+			renderMain();
+		});
+
+		card.addEventListener("contextmenu", (e) => {
 			e.preventDefault();
-			const name = c.dataset.pl!;
-			const pl = state.playlists.find((p) => p.name === name);
-			if (!pl) return;
+			const tracks = pl.ids.map((id) => state.library.find((t) => t.id === id)).filter((x): x is TrackInfo => !!x);
 			showContextMenu(e.clientX, e.clientY, [
 				{ label: "Play", onClick: () => {
-					const tracks = pl.ids.map((id) => state.library.find((t) => t.id === id)).filter((x): x is TrackInfo => !!x);
 					if (tracks.length > 0) { playFromList(tracks, 0); sfx.play(); }
 				}},
-				{ label: "Export as M3U…", onClick: async () => {
+				{ label: "Edit cover & metadata…", onClick: () => openPlaylistArtGenerator(pl) },
+				{ label: "Export as .M3U8…", onClick: async () => {
 					sfx.open();
-					const paths = pl.ids
-						.map((id) => state.library.find((t) => t.id === id))
-						.filter((x): x is TrackInfo => !!x)
-						.map((t) => t.path);
+					const paths = tracks.map((t) => t.path);
 					const r = await bun().exportPlaylist({ name: pl.name, paths });
 					if (r.ok && r.path) toast(`Exported to ${r.path}`, { ttl: 3000 });
-					else toast("Export cancelled.", { ttl: 1800 });
 				}},
-				{ label: "Delete", danger: true, onClick: async () => {
+				{ label: "Delete playlist", danger: true, onClick: async () => {
 					state.playlists = state.playlists.filter((p) => p.name !== name);
 					await savePlaylists();
-					renderPlaylists(root);
-					renderSidebarPlaylists();
 					sfx.toggle();
+					renderMain();
+					renderSidebarPlaylists();
 				}},
 			]);
 		});
 	}
+}
+
+function renderPlaylistDetail(root: HTMLElement, pl: { name: string; ids: string[]; artDataUrl?: string; description?: string }) {
+	const tracks = pl.ids.map((id) => state.library.find((t) => t.id === id)).filter((x): x is TrackInfo => !!x);
+	const totalDur = formatDurationSum(tracks);
+
+	root.innerHTML = `
+		<div class="playlist-detail-container">
+			<div class="detail-back-bar">
+				<button class="btn btn-ghost btn-sm" id="btn-pl-back">${icons.prev}<span>All Playlists</span></button>
+			</div>
+
+			<div class="playlist-hero-card">
+				<div class="playlist-hero-art">
+					${pl.artDataUrl ? `
+						<img src="${pl.artDataUrl}" alt="${escapeHtml(pl.name)}" />
+					` : `
+						<div class="playlist-hero-fallback">${icons.list}</div>
+					`}
+				</div>
+				<div class="playlist-hero-info">
+					<div class="hero-tag">PLAYLIST</div>
+					<h1 class="hero-title" id="hero-pl-title" title="Click to rename">${escapeHtml(pl.name)}</h1>
+					<p class="hero-desc">${escapeHtml(pl.description || "Custom Lakky Playlist")}</p>
+					<div class="hero-meta-row">
+						<span>${tracks.length} track${tracks.length === 1 ? "" : "s"}</span>
+						<span>•</span>
+						<span>${totalDur}</span>
+					</div>
+					<div class="hero-action-buttons">
+						<button class="btn btn-primary" id="btn-hero-play">${icons.play}<span>Play</span></button>
+						<button class="btn" id="btn-hero-shuffle">${icons.shuffle}<span>Shuffle</span></button>
+						<button class="btn btn-ghost" id="btn-hero-add">${icons.plus}<span>Add Tracks</span></button>
+						<button class="btn btn-ghost" id="btn-hero-art">${icons.palette}<span>Change Art</span></button>
+						<button class="btn btn-ghost" id="btn-hero-export">${icons.download}<span>Export .M3U8</span></button>
+						<button class="btn btn-ghost btn-danger" id="btn-hero-delete" title="Delete Playlist">${icons.trash}</button>
+					</div>
+				</div>
+			</div>
+
+			<div class="playlist-tracks-section">
+				${renderTrackTable(tracks, { playlistContext: pl.name })}
+			</div>
+		</div>
+	`;
+
+	// Wire Back
+	document.getElementById("btn-pl-back")?.addEventListener("click", () => {
+		state.activePlaylistName = null;
+		sfx.click();
+		renderMain();
+	});
+
+	// Inline Rename
+	document.getElementById("hero-pl-title")?.addEventListener("click", async () => {
+		const newName = prompt("Rename playlist:", pl.name)?.trim();
+		if (newName && newName !== pl.name) {
+			pl.name = newName;
+			state.activePlaylistName = newName;
+			await savePlaylists();
+			sfx.success();
+			renderMain();
+			renderSidebarPlaylists();
+		}
+	});
+
+	// Hero Actions
+	document.getElementById("btn-hero-play")?.addEventListener("click", () => {
+		if (tracks.length > 0) {
+			playFromList(tracks, 0);
+			sfx.play();
+		} else {
+			toast("Playlist is empty.", { ttl: 2000 });
+		}
+	});
+
+	document.getElementById("btn-hero-shuffle")?.addEventListener("click", () => {
+		if (tracks.length > 0) {
+			state.settings.shuffle = true;
+			playFromList(tracks, Math.floor(Math.random() * tracks.length));
+			sfx.success();
+		}
+	});
+
+	document.getElementById("btn-hero-add")?.addEventListener("click", () => {
+		openAddTracksToPlaylistModal(pl.name);
+	});
+
+	document.getElementById("btn-hero-art")?.addEventListener("click", () => {
+		openPlaylistArtGenerator(pl);
+	});
+
+	document.getElementById("btn-hero-export")?.addEventListener("click", async () => {
+		sfx.open();
+		const paths = tracks.map((t) => t.path);
+		const r = await bun().exportPlaylist({ name: pl.name, paths });
+		if (r.ok && r.path) toast(`Exported to ${r.path}`, { ttl: 3000 });
+		else toast("Export cancelled.", { ttl: 1800 });
+	});
+
+	document.getElementById("btn-hero-delete")?.addEventListener("click", async () => {
+		if (confirm(`Delete playlist "${pl.name}"?`)) {
+			state.playlists = state.playlists.filter((p) => p.name !== pl.name);
+			state.activePlaylistName = null;
+			await savePlaylists();
+			sfx.toggle();
+			renderMain();
+			renderSidebarPlaylists();
+		}
+	});
+
+	wireTrackRows(root, tracks, { playlistContext: pl.name });
 }
 
 function renderStats(root: HTMLElement) {
@@ -2967,6 +6513,7 @@ function renderSettings(root: HTMLElement) {
 	document.getElementById("t-3d-scene")?.addEventListener("click", (e) => {
 		state.settings.show3DScene = !state.settings.show3DScene;
 		(e.currentTarget as HTMLDivElement).classList.toggle("on", state.settings.show3DScene);
+		document.body.classList.toggle("mode-3d-active", state.settings.show3DScene);
 		stylized3dScene?.setVisible(state.settings.show3DScene);
 		saveSettings();
 		sfx.toggle();
@@ -3364,33 +6911,6 @@ function trackCard(t: TrackInfo) {
 	`;
 }
 
-function trackRow(t: TrackInfo, i: number) {
-	const isPlaying = state.currentTrack?.id === t.id;
-	const isVideo = t.kind === "video";
-	const isThreat = (t.securityThreats && t.securityThreats.length > 0) || (t.securityScore !== undefined && t.securityScore < 80);
-
-	const secBadge = isThreat
-		? `<span class="badge-security threat" title="Security alert: click context menu to inspect">${icons.shieldAlert} Alert</span>`
-		: `<span class="badge-security safe" title="Verified clean binary & metadata">${icons.shieldCheck} Safe</span>`;
-
-	return `
-		<div class="track-row ${isPlaying ? "is-playing" : ""}" data-id="${t.id}">
-			<div class="num">${i + 1}</div>
-			<div class="ti">
-				<div class="tt">
-					${isVideo ? `<span class="kind-badge inline">VIDEO</span> ` : ""}
-					<span>${escapeHtml(t.title)}</span>
-					${secBadge}
-				</div>
-				<div class="ta">${escapeHtml(t.artist)}</div>
-			</div>
-			<div class="tb">${escapeHtml(t.album)}</div>
-			<div class="td">${formatTime(t.duration)}</div>
-			<div class="tr">${renderStars(t.id, state.ratings[t.id] ?? 0, false)}</div>
-		</div>
-	`;
-}
-
 function wireCards() {
 	for (const c of document.querySelectorAll<HTMLDivElement>(".card[data-id]")) {
 		c.addEventListener("mousemove", (e) => {
@@ -3504,6 +7024,7 @@ window.addEventListener("beforeunload", () => {
 
 window.addEventListener("keydown", (e) => {
 	if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+	if (usingVideo && state.view === "nowplaying" && cinemaEngine.handleKeydown(e)) return;
 	if (e.code === "Space") {
 		e.preventDefault();
 		engine.togglePlay();
@@ -3611,6 +7132,7 @@ function enterImmersive() {
 		<div class="imm-info" id="imm-info">
 			<div class="imm-title" id="imm-title"></div>
 			<div class="imm-artist" id="imm-artist"></div>
+			<div class="imm-current-lyric" id="imm-current-lyric"></div>
 			<div class="imm-scrub" id="imm-scrub"><div class="imm-scrub-fill" id="imm-scrub-fill"></div></div>
 			<div class="imm-times"><span id="imm-cur-time">0:00</span><span id="imm-dur-time">0:00</span></div>
 			<div class="imm-meta" id="imm-meta"></div>
@@ -3892,16 +7414,34 @@ function updateBulkBar() {
 	}
 	bulkBar.style.display = "flex";
 	bulkBar.innerHTML = `
-		<span>${n} selected</span>
+		<div class="bulk-count-badge">
+			<span class="bulk-count-num">${n}</span>
+			<span class="bulk-count-text">track${n === 1 ? "" : "s"} selected</span>
+		</div>
 		<div class="bulk-actions">
-			<button class="btn" id="bulk-edit">Edit metadata…</button>
-			<button class="btn" id="bulk-queue">Add to queue</button>
-			<button class="btn btn-ghost" id="bulk-clear">Clear</button>
+			<button class="btn btn-primary btn-sm" id="bulk-play">${icons.play}<span>Play</span></button>
+			<button class="btn btn-sm" id="bulk-queue">${icons.plus}<span>Queue</span></button>
+			<button class="btn btn-sm" id="bulk-playlist">${icons.list}<span>Add to Playlist ▾</span></button>
+			<button class="btn btn-sm" id="bulk-export">${icons.download}<span>Export .M3U8</span></button>
+			<button class="btn btn-sm" id="bulk-edit">${icons.edit}<span>Edit Tags</span></button>
+			<button class="btn btn-ghost btn-sm btn-danger" id="bulk-delete" title="Remove">${icons.trash}</button>
+			<button class="btn btn-ghost btn-sm" id="bulk-clear" title="Clear selection">${icons.close}</button>
 		</div>
 	`;
-	document.getElementById("bulk-edit")?.addEventListener("click", () => {
-		openMetadataEditor(Array.from(state.selectedIds));
+
+	const getSelectedTracks = () =>
+		Array.from(state.selectedIds)
+			.map((id) => state.library.find((x) => x.id === id))
+			.filter((t): t is TrackInfo => !!t);
+
+	document.getElementById("bulk-play")?.addEventListener("click", () => {
+		const tracks = getSelectedTracks();
+		if (tracks.length > 0) {
+			playFromList(tracks, 0);
+			sfx.play();
+		}
 	});
+
 	document.getElementById("bulk-queue")?.addEventListener("click", () => {
 		for (const id of state.selectedIds) {
 			const t = state.library.find((x) => x.id === id);
@@ -3911,26 +7451,90 @@ function updateBulkBar() {
 		sfx.click();
 		clearSelection();
 	});
+
+	document.getElementById("bulk-playlist")?.addEventListener("click", (e) => {
+		const ids = Array.from(state.selectedIds);
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		showContextMenu(rect.left, rect.top - 120, [
+			{
+				label: "➕ Create new playlist from selection…",
+				onClick: () => {
+					openPlaylistArtGenerator({ name: "My Playlist", ids }, async (name, artDataUrl, description) => {
+						state.playlists.push({ name, ids, artDataUrl, description });
+						await savePlaylists();
+						toast(`Created "${name}" with ${ids.length} tracks`, { ttl: 2400 });
+						clearSelection();
+						renderMain();
+						renderSidebarPlaylists();
+					});
+				},
+			},
+			...(state.playlists.length > 0 ? [{
+				label: "Existing Playlists",
+				onClick: () => {},
+				sub: state.playlists.map((p) => ({
+					label: `${p.name} (${p.ids.length})`,
+					onClick: async () => {
+						for (const id of ids) if (!p.ids.includes(id)) p.ids.push(id);
+						await savePlaylists();
+						toast(`Added ${ids.length} tracks to "${p.name}"`, { ttl: 2200 });
+						clearSelection();
+						sfx.click();
+						renderMain();
+						renderSidebarPlaylists();
+					},
+				})),
+			}] : []),
+		]);
+	});
+
+	document.getElementById("bulk-export")?.addEventListener("click", async () => {
+		sfx.open();
+		const tracks = getSelectedTracks();
+		const paths = tracks.map((t) => t.path);
+		const r = await bun().exportPlaylist({ name: `Lakky_Selection_${Date.now().toString().slice(-4)}`, paths });
+		if (r.ok && r.path) toast(`Exported ${tracks.length} tracks to ${r.path}`, { ttl: 3000 });
+		else toast("Export cancelled.", { ttl: 1800 });
+	});
+
+	document.getElementById("bulk-edit")?.addEventListener("click", () => {
+		openMetadataEditor(Array.from(state.selectedIds));
+	});
+
+	document.getElementById("bulk-delete")?.addEventListener("click", async () => {
+		if (confirm(`Remove ${state.selectedIds.size} tracks from your library?`)) {
+			state.library = state.library.filter((x) => !state.selectedIds.has(x.id));
+			await saveLibrary();
+			clearSelection();
+			sfx.toggle();
+			renderMain();
+		}
+	});
+
 	document.getElementById("bulk-clear")?.addEventListener("click", clearSelection);
 }
 
 function clearSelection() {
 	state.selectedIds.clear();
-	for (const row of document.querySelectorAll<HTMLDivElement>(".track-row.is-selected")) {
+	for (const row of document.querySelectorAll<HTMLDivElement>(".track-row.is-selected, .cel-track-row.is-selected")) {
 		row.classList.remove("is-selected");
+		const cb = row.querySelector<HTMLInputElement>(".row-checkbox");
+		if (cb) cb.checked = false;
 	}
+	const allBox = document.querySelector<HTMLInputElement>("#select-all-rows");
+	if (allBox) allBox.checked = false;
 	updateBulkBar();
 }
 
 function ctxItemsForBulk(): CtxItem[] {
 	const ids = Array.from(state.selectedIds);
+	const tracks = ids.map((id) => state.library.find((x) => x.id === id)).filter((x): x is TrackInfo => !!x);
 	return [
-		{ label: `Edit metadata for ${ids.length} tracks…`, onClick: () => openMetadataEditor(ids) },
+		{ label: `Play ${ids.length} selected tracks`, onClick: () => {
+			if (tracks.length > 0) { playFromList(tracks, 0); sfx.play(); }
+		}},
 		{ label: `Add ${ids.length} to queue`, onClick: () => {
-			for (const id of ids) {
-				const t = state.library.find((x) => x.id === id);
-				if (t) state.queue.push(t);
-			}
+			for (const t of tracks) state.queue.push(t);
 			toast(`Queued ${ids.length} tracks`, { ttl: 2200 });
 			clearSelection();
 			sfx.click();
@@ -3938,9 +7542,21 @@ function ctxItemsForBulk(): CtxItem[] {
 		{
 			label: "Add to playlist",
 			onClick: () => {},
-			sub: state.playlists.length === 0
-				? [{ label: "(no playlists yet)", onClick: () => {} }]
-				: state.playlists.map((p) => ({
+			sub: [
+				{
+					label: "➕ New Playlist from selection…",
+					onClick: () => {
+						openPlaylistArtGenerator({ name: "Selection", ids }, async (name, artDataUrl, description) => {
+							state.playlists.push({ name, ids, artDataUrl, description });
+							await savePlaylists();
+							toast(`Created "${name}" with ${ids.length} tracks`, { ttl: 2400 });
+							clearSelection();
+							renderMain();
+							renderSidebarPlaylists();
+						});
+					},
+				},
+				...state.playlists.map((p) => ({
 					label: p.name,
 					onClick: () => {
 						for (const id of ids) if (!p.ids.includes(id)) p.ids.push(id);
@@ -3950,10 +7566,18 @@ function ctxItemsForBulk(): CtxItem[] {
 						sfx.click();
 					},
 				})),
+			],
 		},
-		{ label: "Remove from library", danger: true, onClick: () => {
+		{ label: `Export ${ids.length} tracks as .M3U8…`, onClick: async () => {
+			sfx.open();
+			const paths = tracks.map((t) => t.path);
+			const r = await bun().exportPlaylist({ name: `Lakky_Selection`, paths });
+			if (r.ok && r.path) toast(`Exported to ${r.path}`, { ttl: 3000 });
+		}},
+		{ label: `Edit metadata for ${ids.length} tracks…`, onClick: () => openMetadataEditor(ids) },
+		{ label: `Remove ${ids.length} from library`, danger: true, onClick: async () => {
 			state.library = state.library.filter((x) => !state.selectedIds.has(x.id));
-			saveLibrary();
+			await saveLibrary();
 			clearSelection();
 			renderMain();
 			sfx.toggle();
@@ -4198,6 +7822,7 @@ function ctxItemsForTrack(t: TrackInfo): CtxItem[] {
 	try {
 		stylized3dScene = new Stylized3DScene(document.body, state.settings.scenePreset ?? "sakura_sunset", state.settings.sceneOpacity ?? 0.25);
 		stylized3dScene.setVisible(state.settings.show3DScene);
+		document.body.classList.toggle("mode-3d-active", state.settings.show3DScene);
 	} catch (err) {
 		console.warn("[3D] Stylized3DScene init skipped:", err);
 	}

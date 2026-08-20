@@ -98,3 +98,28 @@ export async function fetchLyrics(
 		return null;
 	}
 }
+
+export async function getTrackLyrics(
+	artist: string,
+	album: string,
+	title: string,
+	filePath?: string,
+): Promise<{ plain: string | null; synced: LrcLine[] } | null> {
+	// 1. Check local .lrc file in the same folder as track
+	if (filePath) {
+		try {
+			const candidate = filePath.replace(/\.[^.]+$/, ".lrc");
+			if (existsSync(candidate)) {
+				const content = readFileSync(candidate, "utf8");
+				const synced = parseLRC(content);
+				const plain = synced.length > 0 ? synced.map((s) => s.text).join("\n") : content;
+				return { plain, synced };
+			}
+		} catch (err) {
+			console.warn("[lyrics] local .lrc read failed:", (err as Error).message);
+		}
+	}
+
+	// 2. Fetch from LRCLIB / disk cache
+	return await fetchLyrics(artist, album, title);
+}

@@ -364,7 +364,7 @@ export async function parseExtendedCodecMetadata(filePath: string): Promise<Code
 		const fh = await open(filePath, "r");
 		try {
 			const buf = Buffer.alloc(16384);
-			const { bytesRead } = await fh.read(buf, 0, 16384, 0);
+			const { bytesRead } = await fh.read(buf as any, 0, 16384, 0);
 			const activeBuf = buf.subarray(0, bytesRead);
 
 			if (ext === ".mod") {

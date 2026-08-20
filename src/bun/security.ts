@@ -440,12 +440,12 @@ export async function scanMediaFile(filePath: string): Promise<ScanResult> {
 		const readSize = Math.min(fileSize, 65536);
 		const fileHandle = await open(filePath, "r");
 		headBuf = Buffer.alloc(readSize);
-		await fileHandle.read(headBuf, 0, readSize, 0);
+		await fileHandle.read(headBuf as any, 0, readSize, 0);
 		await fileHandle.close();
 
 		// Calculate SHA-256 hash
 		const fullData = await readFile(filePath);
-		sha256 = createHash("sha256").update(fullData).digest("hex");
+		sha256 = createHash("sha256").update(fullData as any).digest("hex");
 	} catch (err) {
 		return {
 			safe: false,

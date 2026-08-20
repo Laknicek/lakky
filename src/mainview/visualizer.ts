@@ -1,5 +1,16 @@
 type VizMode = "bars" | "strip";
 export type VizStyle = "bars" | "wave" | "radial" | "mirror";
+export type AnimeGradient = "default" | "cyber_neon" | "sakura_sunset" | "ghibli_emerald" | "midnight_shogun" | "synthwave_sunset" | "ocean_shinkai";
+
+export const ANIME_GRADIENTS: Record<AnimeGradient, { name: string; stops: [number, number, number][] }> = {
+	default: { name: "Dynamic Theme", stops: [] },
+	cyber_neon: { name: "Cyber Neon", stops: [[0, 240, 255], [255, 42, 133], [168, 85, 247]] },
+	sakura_sunset: { name: "Sakura Sunset", stops: [[255, 117, 140], [255, 126, 179], [255, 177, 153]] },
+	ghibli_emerald: { name: "Ghibli Emerald", stops: [[16, 185, 129], [52, 211, 153], [110, 231, 183]] },
+	midnight_shogun: { name: "Midnight Shogun", stops: [[139, 92, 246], [251, 191, 36], [244, 63, 94]] },
+	synthwave_sunset: { name: "Synthwave Sunset", stops: [[244, 63, 94], [251, 146, 60], [250, 204, 21]] },
+	ocean_shinkai: { name: "Ocean Shinkai", stops: [[59, 130, 246], [6, 182, 212], [165, 243, 252]] },
+};
 
 export class Visualizer {
 	private canvas: HTMLCanvasElement;
@@ -9,6 +20,7 @@ export class Visualizer {
 	private data: Uint8Array;
 	private timeData: Uint8Array;
 	private style: VizStyle = "bars";
+	private gradientPreset: AnimeGradient = "default";
 	private peaks: Float32Array | null = null;
 	private smoothed: Float32Array | null = null;
 	private raw: Float32Array | null = null;
@@ -91,6 +103,10 @@ export class Visualizer {
 
 	setAccent(rgb: [number, number, number]) {
 		this.accent = rgb;
+	}
+
+	setGradient(preset: AnimeGradient) {
+		this.gradientPreset = preset;
 	}
 
 	setStyle(style: VizStyle) {
@@ -354,6 +370,8 @@ export class Visualizer {
 		}
 
 		if (isStrip) {
+			const preset = ANIME_GRADIENTS[this.gradientPreset];
+			const stops = preset && preset.stops && preset.stops.length >= 2 ? preset.stops : null;
 			// Mirrored bars centered vertically.
 			for (let i = 0; i < bars; i++) {
 				const v = smoothed[i];
@@ -362,12 +380,31 @@ export class Visualizer {
 				const x = i * barW + barW * 0.22;
 				const bw = barW * 0.56;
 				const y = (h - barH) / 2;
+
+				let barR = r, barG = g, barB = b;
+				let barHR = hR, barHG = hG, barHB = hB;
+
+				if (stops) {
+					const t = i / (bars - 1 || 1);
+					const seg = t * (stops.length - 1);
+					const idx = Math.min(Math.floor(seg), stops.length - 2);
+					const frac = seg - idx;
+					const c0 = stops[idx];
+					const c1 = stops[idx + 1];
+					barR = Math.round(c0[0] + (c1[0] - c0[0]) * frac);
+					barG = Math.round(c0[1] + (c1[1] - c0[1]) * frac);
+					barB = Math.round(c0[2] + (c1[2] - c0[2]) * frac);
+					barHR = Math.min(255, barR + 45);
+					barHG = Math.min(255, barG + 45);
+					barHB = Math.min(255, barB + 45);
+				}
+
 				const grad = ctx.createLinearGradient(0, y, 0, y + barH);
-				grad.addColorStop(0, `rgba(${hR}, ${hG}, ${hB}, 0.95)`);
-				grad.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, 0.95)`);
-				grad.addColorStop(1, `rgba(${hR}, ${hG}, ${hB}, 0.95)`);
+				grad.addColorStop(0, `rgba(${barHR}, ${barHG}, ${barHB}, 0.95)`);
+				grad.addColorStop(0.5, `rgba(${barR}, ${barG}, ${barB}, 0.95)`);
+				grad.addColorStop(1, `rgba(${barHR}, ${barHG}, ${barHB}, 0.95)`);
 				ctx.fillStyle = grad;
-				ctx.shadowColor = `rgba(${r}, ${g}, ${b}, ${idle ? 0.18 : 0.55})`;
+				ctx.shadowColor = `rgba(${barR}, ${barG}, ${barB}, ${idle ? 0.2 : 0.6})`;
 				ctx.shadowBlur = idle ? 6 : 10;
 				roundRect(ctx, x, y, bw, barH, Math.min(bw / 2, 2));
 				ctx.fill();

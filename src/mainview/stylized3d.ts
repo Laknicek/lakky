@@ -36,8 +36,8 @@ interface PresetTheme {
 const PRESETS: Record<ScenePreset, PresetTheme> = {
 	sakura_sunset: {
 		skyZenith: new THREE.Color(0x35194d),
-		skyHorizon: new THREE.Color(0xf68388),
-		skyGround: new THREE.Color(0xffb89d),
+		skyHorizon: new THREE.Color(0xf08092),
+		skyGround: new THREE.Color(0xf08092),
 		sunColor: new THREE.Color(0xffecd2),
 		sunPosition: new THREE.Vector3(12, 18, -45),
 		cloudColor: new THREE.Color(0xffe3eb),
@@ -53,14 +53,14 @@ const PRESETS: Record<ScenePreset, PresetTheme> = {
 		foliageShadow: new THREE.Color(0x8c2658),
 		trunkColor: new THREE.Color(0x432822),
 		particleColor: new THREE.Color(0xffc2d1),
-		fogColor: new THREE.Color(0x5c2b66),
-		fogDensity: 0.008,
+		fogColor: new THREE.Color(0xf08092),
+		fogDensity: 0.026,
 		starBrightness: 0.25,
 	},
 	ocean_shinkai: {
 		skyZenith: new THREE.Color(0x04081c),
-		skyHorizon: new THREE.Color(0x0e2f56),
-		skyGround: new THREE.Color(0x08182b),
+		skyHorizon: new THREE.Color(0x0c2545),
+		skyGround: new THREE.Color(0x0c2545),
 		sunColor: new THREE.Color(0xa8ecff),
 		sunPosition: new THREE.Vector3(-15, 22, -45),
 		cloudColor: new THREE.Color(0x386b99),
@@ -76,14 +76,14 @@ const PRESETS: Record<ScenePreset, PresetTheme> = {
 		foliageShadow: new THREE.Color(0x043247),
 		trunkColor: new THREE.Color(0x16222b),
 		particleColor: new THREE.Color(0x75f4ff),
-		fogColor: new THREE.Color(0x091c36),
-		fogDensity: 0.01,
+		fogColor: new THREE.Color(0x0c2545),
+		fogDensity: 0.028,
 		starBrightness: 0.9,
 	},
 	cyber_lake: {
 		skyZenith: new THREE.Color(0x0c0217),
-		skyHorizon: new THREE.Color(0x3b003a),
-		skyGround: new THREE.Color(0x1a0026),
+		skyHorizon: new THREE.Color(0x2e003b),
+		skyGround: new THREE.Color(0x2e003b),
 		sunColor: new THREE.Color(0xff007f),
 		sunPosition: new THREE.Vector3(0, 16, -45),
 		cloudColor: new THREE.Color(0x751b75),
@@ -99,14 +99,14 @@ const PRESETS: Record<ScenePreset, PresetTheme> = {
 		foliageShadow: new THREE.Color(0x240046),
 		trunkColor: new THREE.Color(0x12002e),
 		particleColor: new THREE.Color(0x00ffff),
-		fogColor: new THREE.Color(0x1d0038),
-		fogDensity: 0.012,
+		fogColor: new THREE.Color(0x2e003b),
+		fogDensity: 0.028,
 		starBrightness: 0.7,
 	},
 	ghibli_forest: {
 		skyZenith: new THREE.Color(0x1c6db8),
 		skyHorizon: new THREE.Color(0x8ce1ff),
-		skyGround: new THREE.Color(0xc2f0ff),
+		skyGround: new THREE.Color(0x8ce1ff),
 		sunColor: new THREE.Color(0xfffae6),
 		sunPosition: new THREE.Vector3(18, 26, -40),
 		cloudColor: new THREE.Color(0xffffff),
@@ -122,8 +122,8 @@ const PRESETS: Record<ScenePreset, PresetTheme> = {
 		foliageShadow: new THREE.Color(0x00471f),
 		trunkColor: new THREE.Color(0x523829),
 		particleColor: new THREE.Color(0xffea9f),
-		fogColor: new THREE.Color(0x7ec6f8),
-		fogDensity: 0.007,
+		fogColor: new THREE.Color(0x8ce1ff),
+		fogDensity: 0.024,
 		starBrightness: 0.0,
 	},
 };
@@ -191,10 +191,10 @@ void main() {
     vec3 dir = normalize(vWorldPosition);
     float height = dir.y;
 
-    // Stepped Toon Sky Gradient
-    vec3 skyColor = mix(uSkyHorizon, uSkyZenith, smoothstep(0.0, 0.85, max(0.0, height)));
-    if (height < 0.0) {
-        skyColor = mix(uSkyHorizon, uSkyGround, clamp(-height * 3.0, 0.0, 1.0));
+    // Stepped Toon Sky Gradient - seamless horizon fog blend
+    vec3 skyColor = mix(uSkyHorizon, uSkyZenith, smoothstep(0.02, 0.85, max(0.0, height)));
+    if (height <= 0.02) {
+        skyColor = uSkyHorizon;
     }
 
     // Anime Celestial Sun / Moon Disk with Stepped Glow Aura
@@ -206,17 +206,17 @@ void main() {
     skyColor += (sunDisk + sunHalo1 + sunHalo2) * uSunColor;
 
     // Starfield for night themes
-    if (uStarBrightness > 0.05 && height > 0.1) {
+    if (uStarBrightness > 0.05 && height > 0.12) {
         vec2 starUv = dir.xz / (height + 0.15) * 85.0;
         float starNoise = hash(floor(starUv));
         if (starNoise > 0.985) {
             float twinkle = sin(uTime * 4.0 + starNoise * 20.0) * 0.5 + 0.5;
-            skyColor += vec3(twinkle * uStarBrightness * smoothstep(0.1, 0.5, height));
+            skyColor += vec3(twinkle * uStarBrightness * smoothstep(0.12, 0.5, height));
         }
     }
 
     // Anime Drifting Cumulus Cloud Layer
-    if (height > 0.05) {
+    if (height > 0.08) {
         vec2 cloudUv = (dir.xz / (height + 0.25)) * 1.8 + vec2(uTime * 0.012, uTime * 0.005);
         float cloudShape = fbm(cloudUv);
 
@@ -225,7 +225,7 @@ void main() {
         float cloudLight = smoothstep(0.55, 0.68, cloudShape);
 
         vec3 cloudFinal = mix(uCloudShadow, uCloudColor, cloudLight);
-        skyColor = mix(skyColor, cloudFinal, cloudMask * smoothstep(0.05, 0.3, height));
+        skyColor = mix(skyColor, cloudFinal, cloudMask * smoothstep(0.08, 0.35, height));
     }
 
     gl_FragColor = vec4(skyColor, 1.0);
@@ -371,12 +371,19 @@ void main() {
     finalColor = mix(finalColor, uWaterShallow * 1.3, fresnel * 0.65);
     finalColor += starGlint * uSunColor;
 
-    // Distance atmospheric fog blend
-    float dist = length(cameraPosition - vWorldPosition);
-    float fogFactor = 1.0 - exp(-dist * dist * uFogDensity * uFogDensity);
-    finalColor = mix(finalColor, uFogColor, clamp(fogFactor, 0.0, 1.0));
+    // Two-stage thick fog + radial boundary dissolution
+    // 1. Distance fog from camera
+    float camDist = length(cameraPosition - vWorldPosition);
+    float distFog = 1.0 - exp(-pow(camDist * uFogDensity, 2.2));
 
-    gl_FragColor = vec4(finalColor, 0.94);
+    // 2. Radial world boundary fade (dissolves plane borders into fog)
+    float radDist = length(vWorldPosition.xz);
+    float radialFog = smoothstep(26.0, 58.0, radDist);
+
+    float totalFog = clamp(max(distFog, radialFog), 0.0, 1.0);
+    finalColor = mix(finalColor, uFogColor, totalFog);
+
+    gl_FragColor = vec4(finalColor, 1.0);
 }
 `;
 
@@ -385,19 +392,33 @@ void main() {
 // ==========================================
 const OutlineVertexShader = `
 uniform float uOutlineWidth;
+varying vec3 vWorldPosition;
 
 void main() {
     // Inverted hull extrusion along vertex normal
     vec3 transformed = position + normal * uOutlineWidth;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+    vec4 worldPos = modelMatrix * vec4(transformed, 1.0);
+    vWorldPosition = worldPos.xyz;
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
 }
 `;
 
 const OutlineFragmentShader = `
 uniform vec3 uOutlineColor;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+
+varying vec3 vWorldPosition;
 
 void main() {
-    gl_FragColor = vec4(uOutlineColor, 1.0);
+    float camDist = length(cameraPosition - vWorldPosition);
+    float distFog = 1.0 - exp(-pow(camDist * uFogDensity, 2.2));
+    float radDist = length(vWorldPosition.xz);
+    float radialFog = smoothstep(24.0, 52.0, radDist);
+    float totalFog = clamp(max(distFog, radialFog), 0.0, 1.0);
+
+    vec3 finalColor = mix(uOutlineColor, uFogColor, totalFog);
+    gl_FragColor = vec4(finalColor, 1.0);
 }
 `;
 
@@ -462,11 +483,14 @@ void main() {
     rim = smoothstep(0.68, 0.92, rim) * max(0.0, dot(-L, V) + 0.35);
     litColor += rim * uSunColor * 0.45;
 
-    // Distance fog
-    float dist = length(cameraPosition - vWorldPosition);
-    float fogFactor = 1.0 - exp(-dist * dist * uFogDensity * uFogDensity);
-    vec3 finalColor = mix(litColor, uFogColor, clamp(fogFactor, 0.0, 1.0));
+    // Thick atmospheric and radial edge fog
+    float camDist = length(cameraPosition - vWorldPosition);
+    float distFog = 1.0 - exp(-pow(camDist * uFogDensity, 2.2));
+    float radDist = length(vWorldPosition.xz);
+    float radialFog = smoothstep(24.0, 55.0, radDist);
+    float totalFog = clamp(max(distFog, radialFog), 0.0, 1.0);
 
+    vec3 finalColor = mix(litColor, uFogColor, totalFog);
     gl_FragColor = vec4(finalColor, 1.0);
 }
 `;
@@ -585,6 +609,9 @@ export class Stylized3DScene {
 	private applyPreset(pName: ScenePreset) {
 		const theme = PRESETS[pName] || PRESETS.sakura_sunset;
 
+		// Scene native fog
+		this.scene.fog = new THREE.FogExp2(theme.fogColor.getHex(), theme.fogDensity);
+
 		// Sky uniforms
 		if (this.skyMaterial) {
 			this.skyMaterial.uniforms.uSkyZenith.value.copy(theme.skyZenith);
@@ -620,6 +647,12 @@ export class Stylized3DScene {
 			this.foliageMaterial.uniforms.uFogDensity.value = theme.fogDensity;
 		}
 
+		// Outline uniforms
+		if (this.outlineMaterial) {
+			this.outlineMaterial.uniforms.uFogColor.value.copy(theme.fogColor);
+			this.outlineMaterial.uniforms.uFogDensity.value = theme.fogDensity;
+		}
+
 		// Particles color
 		if (this.particleSystem) {
 			const mat = this.particleSystem.material as THREE.PointsMaterial;
@@ -650,19 +683,21 @@ export class Stylized3DScene {
 		const skyMesh = new THREE.Mesh(skyGeo, this.skyMaterial);
 		this.scene.add(skyMesh);
 
-		// 2. Black Ink Anime Outline Material
+		// 2. Black Ink Anime Outline Material with Thick Fog Fade
 		this.outlineMaterial = new THREE.ShaderMaterial({
 			vertexShader: OutlineVertexShader,
 			fragmentShader: OutlineFragmentShader,
 			uniforms: {
-				uOutlineWidth: { value: 0.05 },
+				uOutlineWidth: { value: 0.055 },
 				uOutlineColor: { value: new THREE.Color(0x0a0914) },
+				uFogColor: { value: new THREE.Color() },
+				uFogDensity: { value: 0.026 },
 			},
 			side: THREE.BackSide,
 		});
 
-		// 3. Water Ocean Plane
-		const waterGeo = new THREE.PlaneGeometry(140, 140, 160, 160);
+		// 3. Expanded Water Ocean Plane (260x260 with radial edge fog dissolution)
+		const waterGeo = new THREE.PlaneGeometry(260, 260, 180, 180);
 		waterGeo.rotateX(-Math.PI / 2);
 
 		this.waterMaterial = new THREE.ShaderMaterial({
@@ -681,9 +716,9 @@ export class Stylized3DScene {
 				uSunPosition: { value: new THREE.Vector3(12, 18, -45) },
 				uSunColor: { value: new THREE.Color() },
 				uFogColor: { value: new THREE.Color() },
-				uFogDensity: { value: 0.008 },
+				uFogDensity: { value: 0.026 },
 			},
-			transparent: true,
+			transparent: false,
 			wireframe: false,
 		});
 
@@ -705,7 +740,7 @@ export class Stylized3DScene {
 				uSunPosition: { value: new THREE.Vector3(12, 18, -45) },
 				uSunColor: { value: new THREE.Color() },
 				uFogColor: { value: new THREE.Color() },
-				uFogDensity: { value: 0.008 },
+				uFogDensity: { value: 0.026 },
 			},
 		});
 
@@ -721,7 +756,7 @@ export class Stylized3DScene {
 		this.createAnimeTree(-14.5, 0.9, -12.5, 1.15);
 		this.createAnimeTree(15.2, 1.0, -10.5, 1.2);
 
-		// 7. Calmer Sakura / Ember Floating Particles (Reduced to 45 elegant petals)
+		// 7. Calmer Sakura / Ember Floating Particles (45 graceful petals)
 		this.createParticles(45);
 	}
 

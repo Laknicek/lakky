@@ -38,7 +38,7 @@ import { readM3U, writeM3U } from "./m3u";
 import { startWebRemote, stopWebRemote } from "./webRemote";
 import { appDataDir, LAKKY_APP_DATA } from "./paths";
 import { fetchLatestRelease, downloadInstaller, spawnInstallerAndQuit } from "./updater";
-import { fetchLyrics } from "./lyrics";
+import { getTrackLyrics } from "./lyrics";
 import { scanMediaFile } from "./security";
 import { registerDefaultPlayerAssociations } from "./systemIntegration";
 
@@ -545,6 +545,11 @@ function makePlayerRPC() {
 				return await registerDefaultPlayerAssociations();
 			},
 
+			getLyrics: async ({ artist, album, title, path }) => {
+				const res = await getTrackLyrics(artist, album, title, path);
+				return res ?? { plain: null, synced: [] };
+			},
+
 			importPlaylist: async () => {
 				const paths = await Utils.openFileDialog({
 					canChooseFiles: true,
@@ -660,14 +665,7 @@ const url = await getMainViewUrl();
 // columns and the equalizer enough breathing room, while still fitting on
 // a 1440p screen with the taskbar visible. Users can resize freely.
 // Centre on the primary monitor.
-let winX = 100, winY = 60;
-try {
-	const { screen } = await import("electron");
-	const primary = screen.getPrimaryDisplay();
-	const { width, height } = primary.workAreaSize;
-	winX = Math.max(0, Math.round((width - 1480) / 2));
-	winY = Math.max(0, Math.round((height - 860) / 2));
-} catch {}
+const winX = 100, winY = 60;
 mainWindow = new BrowserWindow({
 	title: "Lakky",
 	url,

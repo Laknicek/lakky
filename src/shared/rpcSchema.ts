@@ -63,6 +63,15 @@ export type DiscordPresence = {
 	// Up to two buttons that appear on the user's Discord profile to other
 	// viewers — typical use is a "download / website" link.
 	buttons?: Array<{ label: string; url: string }>;
+	// Rich presence extended parameters
+	title?: string;
+	mode?: "spatial" | "lofi" | "video" | "idle" | "normal";
+	paused?: boolean;
+	currentTime?: number;
+	duration?: number;
+	trackNumber?: number;
+	totalTracks?: number;
+	isIdle?: boolean;
 };
 
 export type PlayerRPC = {
@@ -232,6 +241,10 @@ export type PlayerRPC = {
 			setDefaultPlayerAssociations: {
 				params: {};
 				response: { ok: boolean; message: string };
+			};
+			getLyrics: {
+				params: { artist: string; album: string; title: string; path?: string };
+				response: { plain: string | null; synced: Array<{ time: number; text: string }> };
 			};
 		};
 		messages: {};

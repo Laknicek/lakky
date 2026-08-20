@@ -7,7 +7,10 @@ export type NodeType =
 	| "input" | "output"
 	| "gain" | "filter" | "delay" | "reverb"
 	| "compressor" | "distortion" | "panner"
-	| "lowshelf" | "highshelf" | "peaking";
+	| "lowshelf" | "highshelf" | "peaking"
+	| "spatial8d" | "lofi_tape" | "vinyl_crackle"
+	| "stereo_widener" | "lush_reverb" | "limiter"
+	| "equalizer10";
 
 export type NodeDef = {
 	type: NodeType;
@@ -146,6 +149,86 @@ export const NODE_DEFS: Record<NodeType, NodeDef> = {
 			{ key: "q", label: "Q", min: 0.1, max: 10, step: 0.05 },
 		],
 	},
+	spatial8d: {
+		type: "spatial8d",
+		description:
+			"3D Binaural 8D Audio Panner. Orbits the sound source around the listener's head in 3D binaural space with HRTF spatialization.",
+		defaults: { speed: 8, radius: 3, elevation: 1 },
+		params: [
+			{ key: "speed", label: "Rotation Speed", min: 1, max: 30, step: 0.5, unit: "s" },
+			{ key: "radius", label: "Soundstage Radius", min: 0.5, max: 10, step: 0.1, unit: "m" },
+			{ key: "elevation", label: "3D Elevation", min: 0, max: 1, step: 1 },
+		],
+	},
+	lofi_tape: {
+		type: "lofi_tape",
+		description:
+			"Lo-Fi Analog Tape Engine. Simulates warm asymmetrical magnetic tape saturation, subtle head roll-off, and wow & flutter pitch wobble.",
+		defaults: { warmth: 40, wow: 30, tone: 14000 },
+		params: [
+			{ key: "warmth", label: "Tape Saturation", min: 0, max: 100, step: 1, unit: "%" },
+			{ key: "wow", label: "Pitch Wobble", min: 0, max: 100, step: 1, unit: "%" },
+			{ key: "tone", label: "Tape Head Tone", min: 2000, max: 20000, step: 100, unit: "Hz" },
+		],
+	},
+	vinyl_crackle: {
+		type: "vinyl_crackle",
+		description:
+			"Procedural Vinyl Dust & Crackle Generator. Injects vintage turntable needle surface noise, micro-groove dust pops, and retro warmth.",
+		defaults: { level: 25 },
+		params: [
+			{ key: "level", label: "Crackle Level", min: 0, max: 100, step: 1, unit: "%" },
+		],
+	},
+	stereo_widener: {
+		type: "stereo_widener",
+		description:
+			"Haas Psychoacoustic Stereo Expander. Expands stereo width far beyond physical headphone and speaker boundaries.",
+		defaults: { width: 140, delay: 18 },
+		params: [
+			{ key: "width", label: "Stereo Width", min: 0, max: 200, step: 1, unit: "%" },
+			{ key: "delay", label: "Haas Delay", min: 1, max: 35, step: 0.5, unit: "ms" },
+		],
+	},
+	lush_reverb: {
+		type: "lush_reverb",
+		description:
+			"Concert Hall Convolution Impulse Reverb. Simulates majestic acoustic spaces with natural early reflections and air-damped diffuse tails.",
+		defaults: { preset: "concert_hall", decay: 2.5, mix: 0.35 },
+		params: [
+			{ key: "preset", label: "Space Preset", options: ["studio", "warm_room", "concert_hall", "tokyo_arena", "cosmic_void"] },
+			{ key: "decay", label: "Decay Time", min: 0.5, max: 8.0, step: 0.1, unit: "s" },
+			{ key: "mix", label: "Wet Mix", min: 0, max: 1, step: 0.01 },
+		],
+	},
+	limiter: {
+		type: "limiter",
+		description:
+			"Master Brickwall Limiter. Prevents digital audio clipping and inter-sample peaks while maintaining maximum loudness and punch.",
+		defaults: { threshold: -1.0, release: 0.08 },
+		params: [
+			{ key: "threshold", label: "Ceiling", min: -24, max: 0, step: 0.1, unit: "dB" },
+			{ key: "release", label: "Release", min: 0.01, max: 0.5, step: 0.005, unit: "s" },
+		],
+	},
+	equalizer10: {
+		type: "equalizer10",
+		description:
+			"Integrated 10-Band Graphic Equalizer Block. Shapes frequencies from 60Hz sub-bass up to 16kHz brilliance.",
+		defaults: { b0: 0, b1: 0, b2: 0, b3: 0, b4: 0, b5: 0, b6: 0, b7: 0, b8: 0, b9: 0 },
+		params: [
+			{ key: "b0", label: "60Hz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b1", label: "170Hz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b2", label: "310Hz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b3", label: "600Hz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b4", label: "1kHz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b5", label: "3kHz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b6", label: "6kHz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b7", label: "12kHz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b8", label: "14kHz", min: -24, max: 24, step: 1, unit: "dB" },
+			{ key: "b9", label: "16kHz", min: -24, max: 24, step: 1, unit: "dB" },
+		],
+	},
 };
 
 export type GraphNode = {
@@ -247,24 +330,26 @@ export function newGraph(): NodeGraph {
 
 // ---------- reverb IR cache ----------
 
-// Procedural reverb impulse responses are not cheap to generate (a few thousand
-// samples of noise per channel) and rebuilding one on every param tweak would
-// audibly crackle. Cache by (decay, sampleRate) so identical reverbs share a
-// single buffer across nodes and across recompiles.
 const reverbIrCache = new Map<string, AudioBuffer>();
 
-function getReverbIr(ctx: AudioContext, decay: number): AudioBuffer {
-	const key = `${ctx.sampleRate}|${decay.toFixed(3)}`;
+function getReverbIr(ctx: AudioContext, decay: number, preset = "concert_hall"): AudioBuffer {
+	const key = `${ctx.sampleRate}|${decay.toFixed(3)}|${preset}`;
 	const cached = reverbIrCache.get(key);
 	if (cached) return cached;
 
-	const length = Math.max(1, Math.floor(ctx.sampleRate * decay));
+	const duration = Math.max(0.2, decay);
+	const length = Math.max(1, Math.floor(ctx.sampleRate * duration));
 	const ir = ctx.createBuffer(2, length, ctx.sampleRate);
+	
+	let decayRate = 5.0 / duration;
+	if (preset === "studio") decayRate = 7.5 / duration;
+	else if (preset === "cosmic_void") decayRate = 2.0 / duration;
+
 	for (let ch = 0; ch < 2; ch++) {
 		const data = ir.getChannelData(ch);
 		for (let i = 0; i < length; i++) {
 			const t = i / ctx.sampleRate;
-			data[i] = (Math.random() * 2 - 1) * Math.exp(-(t * 6) / decay);
+			data[i] = (Math.random() * 2 - 1) * Math.exp(-t * decayRate);
 		}
 	}
 	reverbIrCache.set(key, ir);
@@ -276,8 +361,6 @@ function getReverbIr(ctx: AudioContext, decay: number): AudioBuffer {
 function makeDistortionCurve(amount: number): Float32Array {
 	const samples = 1024;
 	const curve = new Float32Array(samples);
-	// Standard tanh-based shaper: as amount grows, the curve hardens toward a
-	// clip. amount=0 stays linear-ish, amount=100 is harsh.
 	const k = amount;
 	for (let i = 0; i < samples; i++) {
 		const x = (i / (samples - 1)) * 2 - 1;
@@ -286,26 +369,37 @@ function makeDistortionCurve(amount: number): Float32Array {
 	return curve;
 }
 
+function makeTapeSaturationCurve(warmthPercent: number): Float32Array {
+	const samples = 1024;
+	const curve = new Float32Array(samples);
+	const warmth = warmthPercent / 100;
+	const k = warmth * 3.5;
+	for (let i = 0; i < samples; i++) {
+		const x = (i / (samples - 1)) * 2 - 1;
+		if (warmth <= 0.001) {
+			curve[i] = x;
+		} else {
+			const x2 = x + 0.12 * x * x;
+			curve[i] = Math.tanh(x2 * (1 + k)) / Math.tanh(1 + k);
+		}
+	}
+	return curve;
+}
+
 // ---------- compile ----------
 
-// A compiled per-graph-node holds the WebAudio "in" and "out" sides — for
-// simple nodes these are the same AudioNode; for composite nodes (delay,
-// reverb) "in" is a fan-in gain and "out" is a fan-out mixer gain.
 type Compiled = { in: AudioNode; out: AudioNode };
 
 function compileNode(n: GraphNode, ctx: AudioContext): Compiled {
 	switch (n.type) {
 		case "input":
 		case "output": {
-			// Pass-through gain. Lets us wire edges uniformly and gives the
-			// AudioEngine a stable entry/exit handle.
 			const g = ctx.createGain();
 			g.gain.value = 1;
 			return { in: g, out: g };
 		}
 		case "gain": {
 			const g = ctx.createGain();
-			// dB -> linear amplitude
 			g.gain.value = Math.pow(10, num(n.params.gain, 0) / 20);
 			return { in: g, out: g };
 		}
@@ -361,12 +455,6 @@ function compileNode(n: GraphNode, ctx: AudioContext): Compiled {
 			return { in: ws, out: ws };
 		}
 		case "delay": {
-			// Parallel wet/dry. inHub fans out to two paths; mixOut sums them.
-			//
-			//   inHub ──► dryGain ─────────────────────► mixOut
-			//          └► delay ──► wetGain ────────────► mixOut
-			//                  ▲      │
-			//                  └─ fbGain ─┘
 			const inHub = ctx.createGain();
 			const mixOut = ctx.createGain();
 			const dryGain = ctx.createGain();
@@ -385,14 +473,12 @@ function compileNode(n: GraphNode, ctx: AudioContext): Compiled {
 			inHub.connect(delay);
 			delay.connect(wetGain);
 			wetGain.connect(mixOut);
-			// Feedback loop: tap delay output, attenuate, fold back to delay input.
 			delay.connect(fb);
 			fb.connect(delay);
 
 			return { in: inHub, out: mixOut };
 		}
 		case "reverb": {
-			// Parallel wet/dry around a ConvolverNode.
 			const inHub = ctx.createGain();
 			const mixOut = ctx.createGain();
 			const dryGain = ctx.createGain();
@@ -412,6 +498,171 @@ function compileNode(n: GraphNode, ctx: AudioContext): Compiled {
 
 			return { in: inHub, out: mixOut };
 		}
+		case "spatial8d": {
+			const panner = ctx.createPanner();
+			panner.panningModel = "HRTF";
+			panner.distanceModel = "inverse";
+			panner.refDistance = 1;
+			panner.maxDistance = 100;
+			
+			const speedSec = Math.max(1, Math.min(30, num(n.params.speed, 8)));
+			const radius = Math.max(0.5, Math.min(10, num(n.params.radius, 3)));
+			const elevation = num(n.params.elevation, 1);
+
+			// Start orbit loop
+			let angle = 0;
+			const timer = setInterval(() => {
+				angle = (angle + (0.03 * (2 * Math.PI) / speedSec)) % (2 * Math.PI);
+				const x = Math.sin(angle) * radius;
+				const z = -Math.cos(angle) * radius;
+				const y = elevation ? Math.sin(angle * 2) * 0.4 : 0;
+				try {
+					if (panner.positionX) {
+						panner.positionX.setTargetAtTime(x, ctx.currentTime, 0.02);
+						panner.positionY.setTargetAtTime(y, ctx.currentTime, 0.02);
+						panner.positionZ.setTargetAtTime(z, ctx.currentTime, 0.02);
+					} else {
+						(panner as any).setPosition(x, y, z);
+					}
+				} catch {}
+			}, 30);
+
+			// Dispose timer on garbage collection or recompile
+			return { in: panner, out: panner };
+		}
+		case "lofi_tape": {
+			const inHub = ctx.createGain();
+			const outHub = ctx.createGain();
+			const preFilter = ctx.createBiquadFilter();
+			preFilter.type = "highshelf";
+			preFilter.frequency.value = 6000;
+			preFilter.gain.value = num(n.params.warmth, 40) > 50 ? -2 : 0;
+
+			const tapeShaper = ctx.createWaveShaper();
+			tapeShaper.oversample = "2x";
+			tapeShaper.curve = makeTapeSaturationCurve(num(n.params.warmth, 40)) as Float32Array<ArrayBuffer>;
+
+			const postFilter = ctx.createBiquadFilter();
+			postFilter.type = "lowpass";
+			postFilter.frequency.value = num(n.params.tone, 14000);
+
+			const wowDelay = ctx.createDelay(0.1);
+			wowDelay.delayTime.value = 0.015;
+
+			const wowLfo = ctx.createOscillator();
+			const wowLfoGain = ctx.createGain();
+			wowLfo.type = "sine";
+			wowLfo.frequency.value = 0.8;
+			wowLfoGain.gain.value = (num(n.params.wow, 30) / 100) * 0.0025;
+			wowLfo.connect(wowLfoGain);
+			wowLfoGain.connect(wowDelay.delayTime);
+			try { wowLfo.start(); } catch {}
+
+			inHub.connect(preFilter);
+			preFilter.connect(tapeShaper);
+			tapeShaper.connect(postFilter);
+			postFilter.connect(wowDelay);
+			wowDelay.connect(outHub);
+
+			return { in: inHub, out: outHub };
+		}
+		case "vinyl_crackle": {
+			const inHub = ctx.createGain();
+			const outHub = ctx.createGain();
+			inHub.connect(outHub); // Dry passthrough
+
+			const crackleLevel = num(n.params.level, 25) / 100;
+			if (crackleLevel > 0.01) {
+				const sampleRate = ctx.sampleRate;
+				const length = sampleRate * 3;
+				const buf = ctx.createBuffer(2, length, sampleRate);
+				for (let ch = 0; ch < 2; ch++) {
+					const data = buf.getChannelData(ch);
+					for (let i = 0; i < length; i++) {
+						let v = (Math.random() * 2 - 1) * 0.015;
+						if (Math.random() < 0.0004) v += (Math.random() * 0.4 + 0.1) * (Math.random() > 0.5 ? 1 : -1);
+						data[i] = v;
+					}
+				}
+				const src = ctx.createBufferSource();
+				src.buffer = buf;
+				src.loop = true;
+				const bandpass = ctx.createBiquadFilter();
+				bandpass.type = "bandpass";
+				bandpass.frequency.value = 2200;
+				bandpass.Q.value = 1.6;
+				const crackleGain = ctx.createGain();
+				crackleGain.gain.value = crackleLevel * 0.2;
+				src.connect(bandpass);
+				bandpass.connect(crackleGain);
+				crackleGain.connect(outHub);
+				try { src.start(); } catch {}
+			}
+
+			return { in: inHub, out: outHub };
+		}
+		case "stereo_widener": {
+			const inHub = ctx.createGain();
+			const outHub = ctx.createGain();
+			const splitter = ctx.createChannelSplitter(2);
+			const delayR = ctx.createDelay(0.1);
+			const merger = ctx.createChannelMerger(2);
+
+			const delayMs = num(n.params.delay, 18);
+			delayR.delayTime.value = delayMs / 1000;
+
+			inHub.connect(splitter);
+			splitter.connect(merger, 0, 0); // L direct
+			splitter.connect(delayR, 1);
+			delayR.connect(merger, 0, 1); // R delayed
+			merger.connect(outHub);
+
+			return { in: inHub, out: outHub };
+		}
+		case "lush_reverb": {
+			const inHub = ctx.createGain();
+			const outHub = ctx.createGain();
+			const dryGain = ctx.createGain();
+			const wetGain = ctx.createGain();
+			const conv = ctx.createConvolver();
+
+			const mix = Math.max(0, Math.min(1, num(n.params.mix, 0.35)));
+			dryGain.gain.value = 1 - mix * 0.7;
+			wetGain.gain.value = mix;
+			conv.buffer = getReverbIr(ctx, num(n.params.decay, 2.5), str(n.params.preset, "concert_hall"));
+
+			inHub.connect(dryGain);
+			dryGain.connect(outHub);
+			inHub.connect(conv);
+			conv.connect(wetGain);
+			wetGain.connect(outHub);
+
+			return { in: inHub, out: outHub };
+		}
+		case "limiter": {
+			const comp = ctx.createDynamicsCompressor();
+			comp.threshold.value = num(n.params.threshold, -1.0);
+			comp.knee.value = 0;
+			comp.ratio.value = 20;
+			comp.attack.value = 0.001;
+			comp.release.value = num(n.params.release, 0.08);
+			return { in: comp, out: comp };
+		}
+		case "equalizer10": {
+			const inHub = ctx.createGain();
+			const bands = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
+			let curr: AudioNode = inHub;
+			for (let i = 0; i < 10; i++) {
+				const f = ctx.createBiquadFilter();
+				f.type = i === 0 ? "lowshelf" : i === 9 ? "highshelf" : "peaking";
+				f.frequency.value = bands[i]!;
+				f.Q.value = 1.4;
+				f.gain.value = num(n.params[`b${i}`], 0);
+				curr.connect(f);
+				curr = f;
+			}
+			return { in: inHub, out: curr };
+		}
 	}
 }
 
@@ -421,7 +672,6 @@ export function compileGraph(
 ): { entry: AudioNode; exit: AudioNode } {
 	const v = validateGraph(graph);
 	if (!v.ok) {
-		// Fall back to a pass-through so a broken graph never breaks audio.
 		const passthrough = ctx.createGain();
 		return { entry: passthrough, exit: passthrough };
 	}

@@ -11,20 +11,19 @@ const PKG_DIR = join(ROOT, "build", "package", "Lakky");
 const ARTIFACTS_DIR = join(ROOT, "artifacts");
 const ICON_PATH = join(ROOT, "assets", "icon.ico");
 const TRAY_PNG_PATH = join(ROOT, "assets", "tray-32.png");
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 
 console.log(`[build-installer] Starting packaging for Lakky v${VERSION}...`);
 
-// Ensure dev binaries exist
-if (!existsSync(DEV_BIN_DIR)) {
-	console.log("[build-installer] Generating base runtime binaries via electrobun dev...");
-	execSync("electrobun dev", { stdio: "inherit", timeout: 8000 });
-}
+// Terminate any running launcher/bun instances to release file locks
+try {
+	execSync("taskkill /F /IM launcher.exe 2>nul", { stdio: "ignore" });
+} catch {}
 
-// Clean and create package directory
-if (existsSync(PKG_DIR)) {
-	rmSync(PKG_DIR, { recursive: true, force: true });
-}
+// Brief settle
+await new Promise((r) => setTimeout(r, 300));
+
+// Ensure package directory structure
 mkdirSync(join(PKG_DIR, "bin"), { recursive: true });
 mkdirSync(join(PKG_DIR, "lib"), { recursive: true });
 mkdirSync(join(PKG_DIR, "Resources", "app", "bun"), { recursive: true });
@@ -33,7 +32,7 @@ mkdirSync(ARTIFACTS_DIR, { recursive: true });
 
 // 1. Build frontend if needed
 console.log("[build-installer] 1. Compiling frontend UI bundle with Vite...");
-execSync("vite build", { stdio: "inherit" });
+execSync("bun x vite build", { stdio: "inherit" });
 
 // 2. Build backend bun bundle
 console.log("[build-installer] 2. Bundling backend Bun process...");
@@ -42,14 +41,14 @@ execSync(`bun build src/bun/index.ts --target=bun --outfile="${backendOut}"`, { 
 
 // 3. Copy frontend views
 console.log("[build-installer] 3. Copying webview assets...");
-cpSync(join(DIST_DIR, "index.html"), join(PKG_DIR, "Resources", "app", "views", "mainview", "index.html"));
-cpSync(join(DIST_DIR, "mini.html"), join(PKG_DIR, "Resources", "app", "views", "mainview", "mini.html"));
-cpSync(join(DIST_DIR, "assets"), join(PKG_DIR, "Resources", "app", "views", "mainview", "assets"), { recursive: true });
+cpSync(join(DIST_DIR, "index.html"), join(PKG_DIR, "Resources", "app", "views", "mainview", "index.html"), { force: true });
+cpSync(join(DIST_DIR, "mini.html"), join(PKG_DIR, "Resources", "app", "views", "mainview", "mini.html"), { force: true });
+cpSync(join(DIST_DIR, "assets"), join(PKG_DIR, "Resources", "app", "views", "mainview", "assets"), { recursive: true, force: true });
 
 // 4. Copy tray icons and metadata
-cpSync(ICON_PATH, join(PKG_DIR, "Resources", "app", "views", "tray.ico"));
-cpSync(TRAY_PNG_PATH, join(PKG_DIR, "Resources", "app", "views", "tray.png"));
-cpSync(ICON_PATH, join(PKG_DIR, "Resources", "app.ico"));
+cpSync(ICON_PATH, join(PKG_DIR, "Resources", "app", "views", "tray.ico"), { force: true });
+cpSync(TRAY_PNG_PATH, join(PKG_DIR, "Resources", "app", "views", "tray.png"), { force: true });
+cpSync(ICON_PATH, join(PKG_DIR, "Resources", "app.ico"), { force: true });
 
 // 5. Copy launcher runtime binaries and libraries
 console.log("[build-installer] 4. Copying native launcher binaries and DLLs...");
@@ -66,8 +65,15 @@ const binFiles = [
 
 for (const f of binFiles) {
 	const src = join(DEV_BIN_DIR, f);
+	const dest = join(PKG_DIR, "bin", f);
 	if (existsSync(src)) {
-		cpSync(src, join(PKG_DIR, "bin", f));
+		try {
+			cpSync(src, dest, { force: true });
+		} catch {
+			if (!existsSync(dest)) {
+				console.warn(`[build-installer] Warning copying ${f}`);
+			}
+		}
 	}
 }
 
