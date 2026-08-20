@@ -1,33 +1,135 @@
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, cpSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { execSync } from "node:child_process";
+import { rcedit } from "rcedit";
 
 const ROOT = resolve(import.meta.dir, "..");
-const BUILD_DIR = join(ROOT, "build", "stable-win-x64");
-const LAKKY_DIR = join(BUILD_DIR, "Lakky");
+const DIST_DIR = join(ROOT, "dist");
+const DEV_BIN_DIR = join(ROOT, "build", "dev-win-x64", "Lakky-dev", "bin");
+const DEV_RES_DIR = join(ROOT, "build", "dev-win-x64", "Lakky-dev", "Resources");
+const PKG_DIR = join(ROOT, "build", "package", "Lakky");
 const ARTIFACTS_DIR = join(ROOT, "artifacts");
 const ICON_PATH = join(ROOT, "assets", "icon.ico");
+const TRAY_PNG_PATH = join(ROOT, "assets", "tray-32.png");
 const VERSION = "1.1.0";
 
-if (!existsSync(LAKKY_DIR)) {
-	console.error(`[installer] Error: ${LAKKY_DIR} does not exist. Run "bun run build" first.`);
-	process.exit(1);
+console.log(`[build-installer] Starting packaging for Lakky v${VERSION}...`);
+
+// Ensure dev binaries exist
+if (!existsSync(DEV_BIN_DIR)) {
+	console.log("[build-installer] Generating base runtime binaries via electrobun dev...");
+	execSync("electrobun dev", { stdio: "inherit", timeout: 8000 });
 }
 
-if (!existsSync(ARTIFACTS_DIR)) {
-	mkdirSync(ARTIFACTS_DIR, { recursive: true });
+// Clean and create package directory
+if (existsSync(PKG_DIR)) {
+	rmSync(PKG_DIR, { recursive: true, force: true });
+}
+mkdirSync(join(PKG_DIR, "bin"), { recursive: true });
+mkdirSync(join(PKG_DIR, "lib"), { recursive: true });
+mkdirSync(join(PKG_DIR, "Resources", "app", "bun"), { recursive: true });
+mkdirSync(join(PKG_DIR, "Resources", "app", "views", "mainview", "assets"), { recursive: true });
+mkdirSync(ARTIFACTS_DIR, { recursive: true });
+
+// 1. Build frontend if needed
+console.log("[build-installer] 1. Compiling frontend UI bundle with Vite...");
+execSync("vite build", { stdio: "inherit" });
+
+// 2. Build backend bun bundle
+console.log("[build-installer] 2. Bundling backend Bun process...");
+const backendOut = join(PKG_DIR, "Resources", "app", "bun", "index.js");
+execSync(`bun build src/bun/index.ts --target=bun --outfile="${backendOut}"`, { stdio: "inherit" });
+
+// 3. Copy frontend views
+console.log("[build-installer] 3. Copying webview assets...");
+cpSync(join(DIST_DIR, "index.html"), join(PKG_DIR, "Resources", "app", "views", "mainview", "index.html"));
+cpSync(join(DIST_DIR, "mini.html"), join(PKG_DIR, "Resources", "app", "views", "mainview", "mini.html"));
+cpSync(join(DIST_DIR, "assets"), join(PKG_DIR, "Resources", "app", "views", "mainview", "assets"), { recursive: true });
+
+// 4. Copy tray icons and metadata
+cpSync(ICON_PATH, join(PKG_DIR, "Resources", "app", "views", "tray.ico"));
+cpSync(TRAY_PNG_PATH, join(PKG_DIR, "Resources", "app", "views", "tray.png"));
+cpSync(ICON_PATH, join(PKG_DIR, "Resources", "app.ico"));
+
+// 5. Copy launcher runtime binaries and libraries
+console.log("[build-installer] 4. Copying native launcher binaries and DLLs...");
+const binFiles = [
+	"launcher.exe",
+	"bun.exe",
+	"libNativeWrapper.dll",
+	"WebView2Loader.dll",
+	"libasar.dll",
+	"libasar-arm64.dll",
+	"bspatch.exe",
+	"zig-zstd.exe",
+];
+
+for (const f of binFiles) {
+	const src = join(DEV_BIN_DIR, f);
+	if (existsSync(src)) {
+		cpSync(src, join(PKG_DIR, "bin", f));
+	}
 }
 
-console.log("[installer] 1. Packing Lakky distribution into zip payload...");
+// 6. Copy and configure Resources
+if (existsSync(join(DEV_RES_DIR, "main.js"))) {
+	cpSync(join(DEV_RES_DIR, "main.js"), join(PKG_DIR, "Resources", "main.js"));
+}
+
+const versionJson = {
+	version: VERSION,
+	hash: "stable",
+	channel: "stable",
+	baseUrl: "",
+	name: "Lakky",
+	identifier: "player.lak.app",
+};
+writeFileSync(join(PKG_DIR, "Resources", "version.json"), JSON.stringify(versionJson, null, 2), "utf-8");
+writeFileSync(join(PKG_DIR, "Resources", "build.json"), JSON.stringify({ channel: "stable" }, null, 2), "utf-8");
+
+const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>launcher.exe</string>
+	<key>CFBundleIdentifier</key>
+	<string>player.lak.app</string>
+	<key>CFBundleName</key>
+	<string>Lakky</string>
+	<key>CFBundleVersion</key>
+	<string>${VERSION}</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${VERSION}</string>
+</dict>
+</plist>`;
+writeFileSync(join(PKG_DIR, "Info.plist"), infoPlist, "utf-8");
+
+// 7. Embed icon into launcher.exe and bun.exe
+console.log("[build-installer] 5. Embedding application icon into launcher.exe...");
+const launcherPath = join(PKG_DIR, "bin", "launcher.exe");
+const bunPath = join(PKG_DIR, "bin", "bun.exe");
+try {
+	await rcedit(launcherPath, { icon: ICON_PATH });
+	if (existsSync(bunPath)) await rcedit(bunPath, { icon: ICON_PATH });
+} catch (e) {
+	console.warn("[build-installer] Warning embedding icon:", e);
+}
+
+// 8. Create portable release zip
+console.log("[build-installer] 6. Creating portable release zip...");
+const portableZip = join(ARTIFACTS_DIR, `Lakky-v${VERSION}-win-x64-portable.zip`);
+if (existsSync(portableZip)) unlinkSync(portableZip);
+execSync(`powershell -NoProfile -Command "Get-ChildItem -Path '${PKG_DIR}' | Compress-Archive -DestinationPath '${portableZip}' -Force"`);
+
+// 9. Create payload zip for installer embedding
+console.log("[build-installer] 7. Creating installer payload archive...");
 const payloadZip = join(ROOT, "build", "payload.zip");
 if (existsSync(payloadZip)) unlinkSync(payloadZip);
+execSync(`powershell -NoProfile -Command "Get-ChildItem -Path '${PKG_DIR}' | Compress-Archive -DestinationPath '${payloadZip}' -Force"`);
 
-execSync(`powershell -NoProfile -Command "Compress-Archive -Path '${LAKKY_DIR}\\*' -DestinationPath '${payloadZip}' -Force"`, {
-	stdio: "inherit",
-});
-
-console.log("[installer] 2. Generating custom C# Windows 10/11 Installer source...");
-
+// 10. Generate custom C# Windows Installer Source
+console.log("[build-installer] 8. Generating C# Windows Installer source...");
 const installerCs = `
 using System;
 using System.IO;
@@ -91,6 +193,10 @@ namespace LakkyInstaller
                 {
                     try { p.Kill(); p.WaitForExit(1000); } catch {}
                 }
+                foreach (var p in Process.GetProcessesByName("bun"))
+                {
+                    try { p.Kill(); p.WaitForExit(1000); } catch {}
+                }
                 foreach (var p in Process.GetProcessesByName("lakky"))
                 {
                     try { p.Kill(); p.WaitForExit(1000); } catch {}
@@ -117,10 +223,13 @@ namespace LakkyInstaller
                     foreach (var entry in archive.Entries)
                     {
                         cur++;
-                        string fullPath = Path.Combine(targetDir, entry.FullName);
-                        if (string.IsNullOrEmpty(entry.Name))
+                        string rawPath = entry.FullName.Replace('/', Path.DirectorySeparatorChar).Replace('\\\\', Path.DirectorySeparatorChar);
+                        string fullPath = Path.Combine(targetDir, rawPath);
+
+                        if (entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\\\") || string.IsNullOrEmpty(entry.Name))
                         {
-                            Directory.CreateDirectory(fullPath);
+                            if (!Directory.Exists(fullPath))
+                                Directory.CreateDirectory(fullPath);
                         }
                         else
                         {
@@ -128,13 +237,22 @@ namespace LakkyInstaller
                             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                                 Directory.CreateDirectory(dir);
 
-                            entry.ExtractToFile(fullPath, true);
+                            try
+                            {
+                                if (File.Exists(fullPath))
+                                    File.Delete(fullPath);
+                                entry.ExtractToFile(fullPath, true);
+                            }
+                            catch
+                            {
+                                entry.ExtractToFile(fullPath, true);
+                            }
                         }
 
                         if (progressCallback != null && total > 0)
                         {
                             int pct = (int)((cur / (float)total) * 100);
-                            progressCallback(pct, entry.Name);
+                            progressCallback(pct, Path.GetFileName(rawPath));
                         }
                     }
                 }
@@ -207,7 +325,7 @@ namespace LakkyInstaller
                         key.SetValue("UninstallString", "cmd.exe /c \\"" + uninstallerCmd + "\\"");
                         key.SetValue("NoModify", 1, RegistryValueKind.DWord);
                         key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-                        key.SetValue("EstimatedSize", 35000, RegistryValueKind.DWord);
+                        key.SetValue("EstimatedSize", 125000, RegistryValueKind.DWord);
                     }
                 }
             }
@@ -497,7 +615,8 @@ namespace LakkyInstaller
                         Process.Start(new ProcessStartInfo()
                         {
                             FileName = exePath,
-                            WorkingDirectory = Path.Combine(targetDir, "bin")
+                            WorkingDirectory = Path.Combine(targetDir, "bin"),
+                            UseShellExecute = true
                         });
                     }
                 }
@@ -522,20 +641,17 @@ namespace LakkyInstaller
 const csFile = join(ROOT, "build", "Installer.cs");
 writeFileSync(csFile, installerCs.trim(), "utf-8");
 
-console.log("[installer] 3. Compiling standalone Windows Installer EXE using native csc.exe...");
+// 11. Compile C# standalone installer
+console.log("[build-installer] 9. Compiling standalone Windows Installer with native csc.exe...");
 const outExe = join(ARTIFACTS_DIR, "Lakky-Setup.exe");
+const namedExe = join(ARTIFACTS_DIR, `Lakky-v${VERSION}-Setup.exe`);
 const cscPath = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
 
 const cmd = `"${cscPath}" /target:winexe /win32icon:"${ICON_PATH}" /resource:"${payloadZip}",payload.zip /out:"${outExe}" /platform:x64 /optimize+ /reference:System.IO.Compression.dll,System.IO.Compression.FileSystem.dll,Microsoft.CSharp.dll,System.Drawing.dll,System.Windows.Forms.dll "${csFile}"`;
 
-try {
-	execSync(cmd, { stdio: "inherit" });
-	console.log(`[installer] ✓ Success: Single standalone setup created at: ${outExe}`);
-	// Also copy as Lakky-v1.1.0-Setup.exe for release clarity
-	const namedExe = join(ARTIFACTS_DIR, `Lakky-v${VERSION}-Setup.exe`);
-	execSync(`powershell -NoProfile -Command "Copy-Item '${outExe}' '${namedExe}' -Force"`);
-	console.log(`[installer] ✓ Copied as: ${namedExe}`);
-} catch (err) {
-	console.error("[installer] Compilation error:", err);
-	process.exit(1);
-}
+execSync(cmd, { stdio: "inherit" });
+cpSync(outExe, namedExe, { force: true });
+
+console.log(`[build-installer] ✓ Setup built successfully: ${outExe}`);
+console.log(`[build-installer] ✓ Setup named copy: ${namedExe}`);
+console.log(`[build-installer] ✓ Portable zip: ${portableZip}`);
